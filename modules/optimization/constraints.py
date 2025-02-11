@@ -1,199 +1,100 @@
-# modules/optimization/constraints.py
-
-import numpy as np
+import streamlit as st
 import pandas as pd
 
-def build_asset_class_constraints_mode(
-    df_instruments: pd.DataFrame,
-    asset_classes: list,
-    constraint_mode: str,
-    buffer_pct: float,
-    user_custom_constraints: dict
-) -> dict:
+def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame):
     """
-    Returns a class_constraints dict for each asset class based on the chosen mode:
-      - "custom": uses user_custom_constraints exactly for min_class_weight, max_class_weight, max_instrument_weight
-      - "keep_current": derives min/max from old class weight ± buffer_pct,
-                        but uses user_custom_constraints to retrieve max_instrument_weight
+    A helper function that displays/collects the main constraints for both
+    Manual Single Rolling and Grid Search approaches. Returns a dictionary
+    of the user-selected (or default) parameters.
 
-    Parameters
-    ----------
-    df_instruments : pd.DataFrame
-        Must have a "Weight_Old" column for each instrument (#Asset, #ID, #Quantity, #Last_Price => Value => Weight_Old).
-    asset_classes : list
-        The asset class for each instrument, in the same order as the final MPT weights.
-        (We only need it to ensure we handle all classes that appear in the old portfolio.)
-    constraint_mode : str
-        Either "custom" or "keep_current".
-    buffer_pct : float
-        e.g., 0.05 means ±5%. Only used if constraint_mode=="keep_current".
-    user_custom_constraints : dict
-        The user’s dictionary keyed by asset class, e.g.:
-          {
-            "Equity": {
-              "min_class_weight": 0.2,
-              "max_class_weight": 0.5,
-              "max_instrument_weight": 0.3
-            },
-            ...
-          }
-        For "custom" mode, we read min/max from here.
-        For "keep_current" mode, we only read "max_instrument_weight" from here
-        (the min/max are derived from old weights ± buffer).
-
-    Returns
-    -------
-    class_constraints : dict
-        A dict keyed by asset class name, each containing:
-          {
-            "min_class_weight": float,
-            "max_class_weight": float,
-            "max_instrument_weight": float
-          }
-        that can be passed to build_constraints(...).
+    New in this version:
+    - We allow 'min_instrument_weight' in both "custom" and "keep_current" modes,
+      the same way we already have a 'max_instrument_weight'.
     """
 
-    # If "custom", return user_custom_constraints directly (for min/max).
+    # 1) Basic date logic
+    earliest = df_prices.index.min()
+    earliest_valid = earliest + pd.Timedelta(days=365)
+    user_start = st.date_input(
+        "Start Date",
+        min_value=earliest,
+        value=earliest_valid,
+        max_value=df_prices.index.max()
+    )
+    if pd.Timestamp(user_start) < earliest_valid:
+        st.error("Start date must be at least 1 year after the first date.")
+        st.stop()
+
+    # 2) Constraint mode
+    constraint_mode = st.selectbox("Constraint Mode", ["custom", "keep_current"])
+    user_custom_constraints = {}
+    buffer_pct = 0.0
+    all_classes = df_instruments["#Asset"].unique()
+
+    # 3) Collect constraints
     if constraint_mode == "custom":
-        return user_custom_constraints
+        st.write("Enter class constraints (min/max class weight, min/max instrument weight).")
+        for cl in all_classes:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                min_val = st.number_input(f"{cl} min class %", 0.0, 100.0, 0.0, step=5.0, key=f"{cl}_min_class")
+            with c2:
+                max_val = st.number_input(f"{cl} max class %", 0.0, 100.0, 100.0, step=5.0, key=f"{cl}_max_class")
+            with c3:
+                min_inst = st.number_input(f"{cl} min inst%", 0.0, 100.0, 0.0, step=5.0, key=f"{cl}_min_inst")
+            with c4:
+                max_inst = st.number_input(f"{cl} max inst%", 0.0, 100.0, 100.0, step=5.0, key=f"{cl}_max_inst")
 
-    # If "keep_current", we compute old class weight from df_instruments,
-    # then do ± buffer_pct, but still pull max_instrument_weight from user_custom_constraints.
-    class_constraints = {}
+            user_custom_constraints[cl] = {
+                "min_class_weight": min_val / 100.0,
+                "max_class_weight": max_val / 100.0,
+                "min_instrument_weight": min_inst / 100.0,
+                "max_instrument_weight": max_inst / 100.0
+            }
 
-    # Summation of old portfolio's weight by asset
-    class_old_w = df_instruments.groupby("#Asset")["Weight_Old"].sum()  # e.g. {"Equity": 0.40, "Bond":0.30,...}
+    else:
+        # "keep_current" style => user can set a buffer for class weights,
+        # plus min/max instrument weights if desired
+        buff_in = st.number_input("Buffer (%) around old class weights", 0.0, 100.0, 5.0)
+        buffer_pct = buff_in / 100.0
+        st.write("For each class, define min/max instrument weight if you like.")
+        for cl in all_classes:
+            c1, c2 = st.columns(2)
+            with c1:
+                min_inst = st.number_input(f"{cl} min inst%", 0.0, 100.0, 0.0, step=5.0, key=f"{cl}_min_inst_keep")
+            with c2:
+                max_inst = st.number_input(f"{cl} max inst%", 0.0, 100.0, 100.0, step=5.0, key=f"{cl}_max_inst_keep")
 
-    # For each class that appears in asset_classes or in df_instruments
-    classes_in_data = df_instruments["#Asset"].unique()
+            user_custom_constraints[cl] = {
+                # We'll fill these in dynamically in your "build_final_class_constraints"
+                # But we do have the instrument constraints here:
+                "min_instrument_weight": min_inst / 100.0,
+                "max_instrument_weight": max_inst / 100.0
+            }
 
-    # We'll define constraints for each relevant class
-    for cl in classes_in_data:
-        old_w = class_old_w.get(cl, 0.0)  # if missing, assume 0
-        min_cl = max(0.0, old_w - buffer_pct)
-        max_cl = min(1.0, old_w + buffer_pct)
+    # 4) Daily RF input
+    rf_in = st.number_input("Daily RF (%)", 0.0, 100.0, 0.0)
+    daily_rf = rf_in / 100.0
 
-        # read user’s max_instrument_weight if present
-        if cl in user_custom_constraints:
-            max_inst = user_custom_constraints[cl].get("max_instrument_weight", 1.0)
-        else:
-            max_inst = 1.0
+    # 5) Transaction cost details
+    cost_type = st.selectbox("Transaction Cost Type", ["percentage", "ticket_fee"], index=0)
+    if cost_type == "percentage":
+        cost_in = st.number_input("Cost (%)", 0.0, 100.0, 1.0, step=0.5)
+        transaction_cost_value = cost_in / 100.0
+    else:
+        transaction_cost_value = st.number_input("Ticket Fee", 0.0, 1e9, 10.0, step=10.0)
 
-        class_constraints[cl] = {
-            "min_class_weight": min_cl,
-            "max_class_weight": max_cl,
-            "max_instrument_weight": max_inst
-        }
+    # 6) Trade buffer
+    tb_in = st.number_input("Trade Buffer (%)", 0.0, 50.0, 1.0)
+    trade_buffer_pct = tb_in / 100.0
 
-    return class_constraints
-
-
-def build_constraints(
-    weights: np.ndarray,
-    asset_classes: list,
-    class_constraints: dict
-):
-    """
-    Build SLSQP constraints for:
-      1) sum(weights) = 1
-      2) no short selling => weight[i] >= 0 (via bounds)
-      3) For each asset class:
-         - min_class_weight <= sum(w_class) <= max_class_weight
-         - Each instrument in that class must not exceed 'max_instrument_weight'
-
-    Parameters
-    ----------
-    weights : np.ndarray
-        e.g. np.ones(n)/n for initial guess
-    asset_classes : list of str
-        The asset class for each instrument, same order as weights
-    class_constraints : dict
-        e.g. {
-          "Equity": {
-            "min_class_weight": 0.2,
-            "max_class_weight": 0.5,
-            "max_instrument_weight": 0.3
-          },
-          ...
-        }
-
-    Returns
-    -------
-    cons : list of dict
-        A list of constraints usable by scipy.optimize
-    bounds : list of tuple
-        Bounds for each weight, e.g. (0,1) for no short selling
-    """
-    n = len(weights)
-    if len(asset_classes) != n:
-        raise ValueError("asset_classes length != number of weights")
-
-    # 1) sum(weights)=1
-    cons = [
-        {"type":"eq","fun": lambda w: np.sum(w)-1.0}
-    ]
-
-    # 2) no short => [0,1]
-    bounds = [(0.0,1.0) for _ in range(n)]
-
-    # 3) class constraints
-    unique_classes = list(set(asset_classes))
-    for cl in unique_classes:
-        data = class_constraints.get(cl, {})
-        min_cl = data.get("min_class_weight", 0.0)
-        max_cl = data.get("max_class_weight", 1.0)
-        max_inst= data.get("max_instrument_weight", 1.0)
-
-        # indices for that class
-        idxs= [i for i,a in enumerate(asset_classes) if a==cl]
-
-        def class_min(w, idxs=idxs, min_cl=min_cl):
-            return np.sum(w[idxs]) - min_cl
-        def class_max(w, idxs=idxs, max_cl=max_cl):
-            return max_cl - np.sum(w[idxs])
-
-        cons.append({"type":"ineq","fun": class_min})
-        cons.append({"type":"ineq","fun": class_max})
-
-        # max_instrument_weight => w[i]<= max_inst
-        for i in idxs:
-            def inst_max_weight(w, i=i, max_inst=max_inst):
-                return max_inst- w[i]
-            cons.append({"type":"ineq","fun": inst_max_weight})
-
-    return cons, bounds
-
-
-def build_constraints_from_mode(
-    df_instruments: pd.DataFrame,
-    weights: np.ndarray,
-    asset_classes: list,
-    constraint_mode: str,
-    buffer_pct: float,
-    user_custom_constraints: dict
-):
-    """
-    High-level function that:
-      1) builds a 'class_constraints' dict using build_asset_class_constraints_mode
-      2) calls build_constraints(...) to get (cons,bounds)
-
-    Steps:
-      - df_instruments must have "Weight_Old" for each instrument
-      - user_custom_constraints used either in "custom" mode or for "max_instrument_weight" in "keep_current"
-    """
-    # 1) derive the final class_constraints
-    class_constraints = build_asset_class_constraints_mode(
-        df_instruments=df_instruments,
-        asset_classes=asset_classes,
-        constraint_mode=constraint_mode,
-        buffer_pct=buffer_pct,
-        user_custom_constraints=user_custom_constraints
-    )
-
-    # 2) build the final constraints & bounds
-    cons, bnds = build_constraints(
-        weights=weights,
-        asset_classes=asset_classes,
-        class_constraints=class_constraints
-    )
-    return cons, bnds
+    return {
+        "user_start": user_start,
+        "constraint_mode": constraint_mode,
+        "buffer_pct": buffer_pct,
+        "user_custom_constraints": user_custom_constraints,
+        "daily_rf": daily_rf,
+        "cost_type": cost_type,
+        "transaction_cost_value": transaction_cost_value,
+        "trade_buffer_pct": trade_buffer_pct
+    }
