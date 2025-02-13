@@ -2,38 +2,52 @@
 
 import pandas as pd
 import numpy as np
-import time
-import streamlit as st
-import concurrent.futures
-import traceback
-
-from modules.analytics.returns_cov import compute_performance_metrics
 from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
-from modules.optimization.cvxpy_optimizer import parametric_max_sharpe
-from modules.optimization.utils.michaud import parametric_max_sharpe_michaud
+from modules.analytics.returns_cov import compute_performance_metrics
+
+# If you have Michaud in a separate file:
+# from modules.optimization.utils.michaud import parametric_max_sharpe_michaud
+from modules.optimization.cvxpy_optimizer import parametric_max_sharpe_aclass_subtype
 
 def run_one_combo(
-    df_prices, df_instruments, asset_classes, class_constraints,
-    daily_rf, combo,
-    transaction_cost_value, transaction_cost_type, trade_buffer_pct,
-    use_michaud, n_boot, do_shrink_means, do_shrink_cov, reg_cov,
-    do_ledoitwolf, do_ewm, ewm_alpha
-):
+    df_prices: pd.DataFrame,
+    df_instruments: pd.DataFrame,
+    asset_cls_list: list[str],
+    sec_type_list: list[str],
+    class_sum_constraints: dict,
+    subtype_constraints: dict,
+    daily_rf: float,
+    combo: tuple,
+    transaction_cost_value: float,
+    transaction_cost_type: str,
+    trade_buffer_pct: float,
+    use_michaud: bool,
+    n_boot: int,
+    do_shrink_means: bool,
+    do_shrink_cov: bool,
+    reg_cov: bool,
+    do_ledoitwolf: bool,
+    do_ewm: bool,
+    ewm_alpha: float
+) -> dict:
     """
-    Top-level function => can be pickled.
-    combo => (n_pts, alpha_, beta_, freq_, lb_)
-    Runs a single param set, returning performance metrics & final weights.
+    This is the single-combo worker called by rolling_grid_search.
+    combo => (n_pts, alpha_, beta_, freq_, lb_).
+    Returns a dict with performance metrics & final weights.
     """
     n_pts, alpha_, beta_, freq_, lb_ = combo
     col_tickers = df_prices.columns.tolist()
 
     def param_sharpe_fn(sub_ret: pd.DataFrame):
+        # If you want to handle Michaud vs standard:
         if use_michaud:
+            from modules.optimization.utils.michaud import parametric_max_sharpe_michaud
             w_opt, _ = parametric_max_sharpe_michaud(
                 df_returns=sub_ret,
                 tickers=col_tickers,
-                asset_classes=asset_classes,
-                class_constraints=class_constraints,
+                asset_classes=asset_cls_list,
+                # Possibly add security_types if your michaud variant requires it
+                class_constraints=class_sum_constraints,
                 daily_rf=daily_rf,
                 no_short=True,
                 n_points=n_pts,
@@ -48,11 +62,14 @@ def run_one_combo(
                 n_boot=n_boot
             )
         else:
-            w_opt, _ = parametric_max_sharpe(
+            # Standard approach with security-type constraints
+            w_opt, _ = parametric_max_sharpe_aclass_subtype(
                 df_returns=sub_ret,
                 tickers=col_tickers,
-                asset_classes=asset_classes,
-                class_constraints=class_constraints,
+                asset_classes=asset_cls_list,
+                security_types=sec_type_list,
+                class_constraints=class_sum_constraints,
+                subtype_constraints=subtype_constraints,
                 daily_rf=daily_rf,
                 no_short=True,
                 n_points=n_pts,
@@ -70,7 +87,9 @@ def run_one_combo(
     # Convert months to days
     window_days = lb_ * 21
 
-    sr_line, final_w, _, _ = rolling_backtest_monthly_param_sharpe(
+    # NOTE: rolling_backtest_monthly_param_sharpe returns 5 items:
+    # (sr_norm, last_w_final, final_old_w_last, final_rebal_date, df_rebal)
+    sr_line, final_w, _, _, _ = rolling_backtest_monthly_param_sharpe(
         df_prices=df_prices,
         df_instruments=df_instruments,
         param_sharpe_fn=param_sharpe_fn,
@@ -83,13 +102,14 @@ def run_one_combo(
         trade_buffer_pct=trade_buffer_pct
     )
 
+    # Now compute performance
     if len(sr_line) > 1:
         perf = compute_performance_metrics(sr_line, daily_rf=daily_rf)
-        sr = perf["Sharpe Ratio"]
+        sr_val = perf["Sharpe Ratio"]
         ann_ret = perf["Annualized Return"]
         ann_vol = perf["Annualized Volatility"]
     else:
-        sr = 0.0
+        sr_val = 0.0
         ann_ret = 0.0
         ann_vol = 0.0
 
@@ -99,102 +119,8 @@ def run_one_combo(
         "beta_cov": beta_,
         "rebal_freq": freq_,
         "lookback_m": lb_,
-        "Sharpe Ratio": sr,
+        "Sharpe Ratio": sr_val,
         "Annual Ret": ann_ret,
         "Annual Vol": ann_vol,
         "final_weights": final_w
     }
-
-def rolling_grid_search(
-    df_prices: pd.DataFrame,
-    df_instruments: pd.DataFrame,
-    asset_classes: list[str],
-    class_constraints: dict,
-    daily_rf: float,
-    frontier_points_list: list[float],
-    alpha_list: list[float],
-    beta_list: list[float],
-    rebal_freq_list: list[int],
-    lookback_list: list[int],
-    transaction_cost_value: float = 0.0,
-    transaction_cost_type: str = "percentage",
-    trade_buffer_pct: float = 0.0,
-    use_michaud: bool = False,
-    n_boot: int = 10,
-    do_shrink_means: bool = True,
-    do_shrink_cov: bool = True,
-    reg_cov: bool = False,
-    do_ledoitwolf: bool = False,
-    do_ewm: bool = False,
-    ewm_alpha: float = 0.06,
-    max_workers: int = 4
-) -> pd.DataFrame:
-    """
-    Parallel grid search with concurrent.futures.
-    Each combo => run_one_combo => child process => returns performance.
-    """
-    combos = []
-    for n_pts in frontier_points_list:
-        for alpha_ in alpha_list:
-            for beta_ in beta_list:
-                for freq_ in rebal_freq_list:
-                    for lb_ in lookback_list:
-                        combos.append((n_pts, alpha_, beta_, freq_, lb_))
-    total = len(combos)
-    df_out = []
-
-    progress_text = st.empty()
-    progress_bar = st.progress(0)
-    start_time = time.time()
-    completed = 0
-
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_to_combo = {}
-        for combo in combos:
-            future = executor.submit(
-                run_one_combo,
-                df_prices, df_instruments, asset_classes, class_constraints,
-                daily_rf, combo,
-                transaction_cost_value, transaction_cost_type, trade_buffer_pct,
-                use_michaud, n_boot, do_shrink_means, do_shrink_cov, reg_cov,
-                do_ledoitwolf, do_ewm, ewm_alpha
-            )
-            future_to_combo[future] = combo
-
-        for future in as_completed(future_to_combo):
-            combo = future_to_combo[future]
-            try:
-                result_dict = future.result()
-            except Exception as exc:
-                # Debugging lines: Show error & traceback in Streamlit
-                st.error(f"Error for combo {combo}: {exc}")
-                st.text(traceback.format_exc())
-
-                n_pts, alpha_, beta_, freq_, lb_ = combo
-                result_dict = {
-                    "n_points": n_pts,
-                    "alpha_mean": alpha_,
-                    "beta_cov": beta_,
-                    "rebal_freq": freq_,
-                    "lookback_m": lb_,
-                    "Sharpe Ratio": 0.0,
-                    "Annual Ret": 0.0,
-                    "Annual Vol": 0.0,
-                    "final_weights": None
-                }
-
-            df_out.append(result_dict)
-            completed += 1
-            percent_complete = int(completed * 100 / total)
-            elapsed = time.time() - start_time
-            progress_text.text(
-                f"Progress: {percent_complete}% complete. "
-                f"Elapsed: {elapsed:.1f}s"
-            )
-            progress_bar.progress(percent_complete)
-
-    total_elapsed = time.time() - start_time
-    progress_text.text(f"Grid search done in {total_elapsed:.1f}s.")
-    return pd.DataFrame(df_out)

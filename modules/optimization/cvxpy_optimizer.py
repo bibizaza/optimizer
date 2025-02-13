@@ -1,3 +1,5 @@
+# File: modules/optimization/cvxpy_optimizer.py
+
 import numpy as np
 import cvxpy as cp
 import pandas as pd
@@ -29,15 +31,8 @@ def parametric_max_sharpe_aclass_subtype(
 ):
     """
     Computes an optimal portfolio (maximizing Sharpe) subject to:
-      1) For each asset class, the sum of weights must lie within [min_class_weight, max_class_weight].
-      2) For each instrument with a sub‑type constraint, its weight must lie within [min_instrument, max_instrument].
-      
-    Parameters:
-      (See docstring for detailed explanation.)
-      
-    Returns:
-      - best_w: the optimal weight vector (numpy array)
-      - summary: a dict with "Annual Return (%)", "Annual Vol (%)", and "Sharpe Ratio"
+      1) For each asset class, sum of weights in [min_class_weight, max_class_weight].
+      2) For each (class, security_type) in subtype_constraints => instrument bound in [min_instrument, max_instrument].
     """
     if security_types is None:
         security_types = ["Unknown"] * df_returns.shape[1]
@@ -50,7 +45,7 @@ def parametric_max_sharpe_aclass_subtype(
     if len(security_types) != n:
         raise ValueError("security_types length mismatch.")
 
-    # 1) Build covariance matrix
+    # 1) Build covariance
     if do_ewm:
         cov_raw = compute_ewm_cov(df_returns, alpha=ewm_alpha)
     else:
@@ -62,11 +57,12 @@ def parametric_max_sharpe_aclass_subtype(
                 cov_raw = nearest_pd(cov_raw)
             if shrink_cov and beta > 0:
                 cov_raw = shrink_cov_diagonal(cov_raw, beta)
+
     SHIFT_EPS = 1e-8
     cov_fixed = cov_raw + SHIFT_EPS * np.eye(n)
     cov_expr = cp.psd_wrap(cov_fixed)
 
-    # 2) Process mean returns
+    # 2) Mean returns
     mean_ret = df_returns.mean().values
     if shrink_means and alpha > 0:
         mean_ret = shrink_mean_to_grand_mean(mean_ret, alpha)
@@ -88,24 +84,22 @@ def parametric_max_sharpe_aclass_subtype(
         if no_short:
             constraints.append(w >= 0)
 
-        # Target return constraint
+        # Return constraint
         constraints.append((mean_ret @ w) * 252 >= targ)
 
-        # Layer 1: Enforce class-sum constraints
+        # Class constraints
         unique_cls = set(asset_classes)
         for cl in unique_cls:
-            idxs = [i for i, a in enumerate(asset_classes) if a == cl]
+            idxs = [i for i,a in enumerate(asset_classes) if a == cl]
             cdict = class_constraints.get(cl, {})
             min_class = cdict.get("min_class_weight", 0.0)
             max_class = cdict.get("max_class_weight", 1.0)
             constraints.append(cp.sum(w[idxs]) >= min_class)
             constraints.append(cp.sum(w[idxs]) <= max_class)
 
-            # Layer 2: Enforce individual (per-instrument) bounds for those with subtype constraints.
-            # (If no constraint is provided for a given (class, security_type) pair, default is [0,1].)
+            # Subtype constraints
             for i in idxs:
                 stp = security_types[i]
-                # Look up per-instrument bounds in subtype_constraints.
                 if (cl, stp) in subtype_constraints:
                     stvals = subtype_constraints[(cl, stp)]
                     min_inst = stvals.get("min_instrument", 0.0)
@@ -113,7 +107,7 @@ def parametric_max_sharpe_aclass_subtype(
                     constraints.append(w[i] >= min_inst)
                     constraints.append(w[i] <= max_inst)
 
-        # Solve the optimization problem.
+        # Solve
         prob = cp.Problem(objective, constraints)
         solved = False
         for solver in [cp.SCS, cp.ECOS]:

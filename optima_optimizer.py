@@ -1,3 +1,5 @@
+# File: optima_optimizer.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,6 +14,7 @@ from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
 # Module-level imports from our project modules:
+# (Make sure the paths match your actual folder structure)
 from modules.optimization.cvxpy_optimizer import parametric_max_sharpe_aclass_subtype
 from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
 from modules.analytics.returns_cov import compute_performance_metrics
@@ -31,6 +34,10 @@ def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     return df_instruments, df_prices_raw
 
 def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
+    """
+    Removes rows where the fraction of non-null cells < min_coverage.
+    Then ffill/bfill to fill remaining NaNs.
+    """
     df_prices = df_prices.copy()
     coverage = df_prices.notna().sum(axis=1)
     n_cols = df_prices.shape[1]
@@ -40,12 +47,17 @@ def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     return df_prices
 
 def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> pd.Series:
+    """
+    Creates a time series for the old portfolio's performance, given #Quantity.
+    Normalizes it to 1 at the first date.
+    """
     df_prices = df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
     ticker_qty = {}
     for _, row in df_instruments.iterrows():
         tkr = row["#ID"]
         qty = row["#Quantity"]
         ticker_qty[tkr] = qty
+
     col_list = df_prices.columns
     old_shares = np.array([ticker_qty.get(c, 0.0) for c in col_list])
     vals = [np.sum(old_shares * r.values) for _, r in df_prices.iterrows()]
@@ -66,6 +78,7 @@ def main():
     if approach_data == "One-time Convert Excel->Parquet":
         st.info("Excel-to-Parquet converter not shown here.")
         st.stop()
+
     if approach_data == "Use Excel for Analysis":
         excel_file = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
         if not excel_file:
@@ -89,14 +102,14 @@ def main():
     user_start = main_constr["user_start"]
     constraint_mode = main_constr["constraint_mode"]
     buffer_pct = main_constr["buffer_pct"]
-    class_sum_constraints = main_constr["class_sum_constraints"]
-    subtype_constraints = main_constr["subtype_constraints"]
+    class_sum_constraints = main_constr["class_sum_constraints"]  # a dict: {className: {min_class_weight, max_class_weight}}
+    subtype_constraints = main_constr["subtype_constraints"]      # a dict: {(class, secType): {min_instrument, max_instrument}}
     daily_rf = main_constr["daily_rf"]
     cost_type = main_constr["cost_type"]
     transaction_cost_value = main_constr["transaction_cost_value"]
     trade_buffer_pct = main_constr["trade_buffer_pct"]
 
-    # Build old portfolio weights
+    # 3) Build old portfolio weights
     df_instruments["Value"] = df_instruments["#Quantity"] * df_instruments["#Last_Price"]
     tot_val = df_instruments["Value"].sum()
     if tot_val <= 0:
@@ -104,7 +117,7 @@ def main():
         df_instruments.loc[df_instruments.index[0], "Value"] = 1.0
     df_instruments["Weight_Old"] = df_instruments["Value"] / tot_val
 
-    # For keep_current mode, override class_sum_constraints using old portfolio weights ± buffer.
+    # 4) If 'keep_current' mode => override class_sum_constraints with old portfolio +/- buffer
     if constraint_mode == "keep_current":
         class_old_w = df_instruments.groupby("#Asset")["Weight_Old"].sum()
         for cl in df_instruments["#Asset"].unique():
@@ -113,6 +126,7 @@ def main():
             mx = min(1.0, oldw + buffer_pct)
             class_sum_constraints[cl] = {"min_class_weight": mn, "max_class_weight": mx}
 
+    # 5) Subset the price data from user_start
     df_sub = df_prices_clean.loc[pd.Timestamp(user_start):]
     if len(df_sub) < 2:
         st.error("Not enough data from the selected start date.")
@@ -120,6 +134,8 @@ def main():
 
     col_tickers = df_sub.columns.tolist()
     have_sec_type = ("#Security_Type" in df_instruments.columns)
+
+    # Build lists: asset_cls_list, sec_type_list for each ticker
     asset_cls_list = []
     sec_type_list = []
     for tk in col_tickers:
@@ -158,7 +174,9 @@ def main():
         n_points_man = st.number_input("Frontier #points", 5, 100, 15, step=5)
 
         if st.button("Run Rolling (Manual)"):
+
             def param_sharpe_fn(sub_ret: pd.DataFrame):
+                # Calls your parametric_max_sharpe_aclass_subtype solver
                 w_opt, summary = parametric_max_sharpe_aclass_subtype(
                     df_returns = sub_ret,
                     tickers = col_tickers,
@@ -180,6 +198,7 @@ def main():
                 )
                 return w_opt, summary
 
+            # Use rolling backtest
             from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
             sr_line, final_w, old_w_last, final_rebal_date, df_rebal = rolling_backtest_monthly_param_sharpe(
                 df_prices = df_sub,
@@ -196,7 +215,6 @@ def main():
             st.write("### Rebalance Debug Table")
             st.dataframe(df_rebal)
 
-            from modules.analytics.returns_cov import compute_performance_metrics
             old_line = build_old_portfolio_line(df_instruments, df_sub)
             idx_all = old_line.index.union(sr_line.index)
             old_line_u = old_line.reindex(idx_all, method="ffill")
@@ -209,13 +227,12 @@ def main():
             }, index=idx_all)
             st.line_chart(df_cum)
 
-            perf_old = compute_performance_metrics(old_line_u * old0, daily_rf = daily_rf)
-            perf_new = compute_performance_metrics(new_line_u * new0, daily_rf = daily_rf)
+            perf_old = compute_performance_metrics(old_line_u * old0, daily_rf=daily_rf)
+            perf_new = compute_performance_metrics(new_line_u * new0, daily_rf=daily_rf)
             df_perf = pd.DataFrame({"Old": perf_old, "New": perf_new})
             st.write("**Performance**:")
             st.dataframe(df_perf)
 
-            from modules.analytics.weight_display import display_instrument_weight_diff, display_class_weight_diff
             display_instrument_weight_diff(df_instruments, col_tickers, final_w)
             display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
@@ -229,16 +246,16 @@ def main():
         max_workers = st.number_input("Max Workers", 1, 64, 4, step=1)
 
         if st.button("Run Grid Search"):
-            if (not frontier_points_list or not alpha_list or not beta_list or not rebal_freq_list or not lookback_list):
+            if (not frontier_points_list or not alpha_list or not beta_list
+                or not rebal_freq_list or not lookback_list):
                 st.error("Please select at least one value in each parameter.")
             else:
-                from modules.analytics.returns_cov import compute_performance_metrics
                 from modules.backtesting.rolling_monthly import rolling_grid_search
                 df_gs = rolling_grid_search(
                     df_prices = df_sub,
                     df_instruments = df_instruments,
-                    asset_classes = asset_cls_list,
-                    security_types = sec_type_list,
+                    asset_cls_list = asset_cls_list,     # pass it here
+                    sec_type_list = sec_type_list,       # pass it here
                     class_sum_constraints = class_sum_constraints,
                     subtype_constraints = subtype_constraints,
                     daily_rf = daily_rf,
@@ -262,14 +279,16 @@ def main():
                 best_ = df_gs.sort_values("Sharpe Ratio", ascending=False).head(5)
                 st.write("**Top 5**:")
                 st.dataframe(best_)
+
     else:
         st.subheader("Bayesian => security-type constraints")
-        from modules.backtesting.rolling_monthly import run_bayesian_inplace
-        run_bayesian_inplace(
+        from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
+        # pass the same lists & constraints
+        rolling_bayesian_optimization(
             df_prices = df_sub,
             df_instruments = df_instruments,
-            asset_classes = asset_cls_list,
-            security_types = sec_type_list,
+            asset_cls_list = asset_cls_list,
+            sec_type_list = sec_type_list,
             class_sum_constraints = class_sum_constraints,
             subtype_constraints = subtype_constraints,
             daily_rf = daily_rf,
