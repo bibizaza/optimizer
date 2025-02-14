@@ -14,12 +14,18 @@ from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
 # Module-level imports from our project modules:
-# (Make sure the paths match your actual folder structure)
 from modules.optimization.cvxpy_optimizer import parametric_max_sharpe_aclass_subtype
 from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
 from modules.analytics.returns_cov import compute_performance_metrics
 from modules.analytics.weight_display import display_instrument_weight_diff, display_class_weight_diff
 from modules.analytics.constraints import get_main_constraints
+
+# NEW: Import your efficient_frontier functions
+from modules.optimization.efficient_frontier import (
+    compute_efficient_frontier_cvxpy,
+    interpolate_frontier_for_vol,
+    plot_frontier_comparison
+)
 
 def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_instruments = pd.read_excel(file, sheet_name=streamlit_sheet, header=0)
@@ -102,8 +108,8 @@ def main():
     user_start = main_constr["user_start"]
     constraint_mode = main_constr["constraint_mode"]
     buffer_pct = main_constr["buffer_pct"]
-    class_sum_constraints = main_constr["class_sum_constraints"]  # a dict: {className: {min_class_weight, max_class_weight}}
-    subtype_constraints = main_constr["subtype_constraints"]      # a dict: {(class, secType): {min_instrument, max_instrument}}
+    class_sum_constraints = main_constr["class_sum_constraints"]  # dict: {className: {min_class_weight, max_class_weight}}
+    subtype_constraints = main_constr["subtype_constraints"]      # dict: {(class,secType): {min_instrument, max_instrument}}
     daily_rf = main_constr["daily_rf"]
     cost_type = main_constr["cost_type"]
     transaction_cost_value = main_constr["transaction_cost_value"]
@@ -198,7 +204,6 @@ def main():
                 )
                 return w_opt, summary
 
-            # Use rolling backtest
             from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
             sr_line, final_w, old_w_last, final_rebal_date, df_rebal = rolling_backtest_monthly_param_sharpe(
                 df_prices = df_sub,
@@ -222,8 +227,8 @@ def main():
             old0 = old_line_u.iloc[0]
             new0 = new_line_u.iloc[0]
             df_cum = pd.DataFrame({
-                "Old(%)": (old_line_u/old0 - 1)*100,
-                "New(%)": (new_line_u/new0 - 1)*100
+                "Old(%)": (old_line_u / old0 - 1)*100,
+                "New(%)": (new_line_u / new0 - 1)*100
             }, index=idx_all)
             st.line_chart(df_cum)
 
@@ -235,6 +240,75 @@ def main():
 
             display_instrument_weight_diff(df_instruments, col_tickers, final_w)
             display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
+
+            ############################################################################
+            # ADD: Final-day Frontier
+            ############################################################################
+            if final_rebal_date is not None:
+                # We'll compute the frontier using the final day's lookback window
+                start_final = final_rebal_date - pd.Timedelta(days=window_days)
+                # in case start_final < earliest date
+                start_final = max(df_sub.index[0], start_final)
+                df_final_ret = df_sub.loc[start_final:final_rebal_date].pct_change().fillna(0.0)
+
+                # call your frontier function
+                fvol, fret = compute_efficient_frontier_cvxpy(
+                    df_returns=df_final_ret,
+                    n_points=50,
+                    clamp_min_return=0.0,
+                    remove_dominated=True,
+                    do_shrink_means=do_shrink_means,
+                    alpha=alpha_shrink,
+                    do_shrink_cov=do_shrink_cov,
+                    beta=beta_shrink,
+                    use_ledoitwolf=do_ledoitwolf,
+                    do_ewm=do_ewm,
+                    ewm_alpha=ewm_alpha,
+                    regularize_cov=reg_cov,
+                    final_w=final_w,  # just so it includes final_w's return
+                    class_constraints=class_sum_constraints,
+                    col_tickers=col_tickers,
+                    df_instruments=df_instruments
+                )
+
+                if len(fvol) == 0:
+                    st.warning("Efficient frontier is empty under these constraints.")
+                else:
+                    # We'll do a quick daily vol/ret for old vs new
+                    # from the same final period
+                    cov_final = df_final_ret.cov().values
+                    mean_final = df_final_ret.mean().values
+                    def daily_vol_ret(w):
+                        v = np.sqrt(w @ cov_final @ w) * np.sqrt(252)
+                        r = (mean_final @ w) * 252
+                        return v, r
+
+                    # old portfolio weights => from df_instruments["Weight_Old"]
+                    old_map = {}
+                    for i, tkr in enumerate(col_tickers):
+                        row2 = df_instruments[df_instruments["#ID"] == tkr]
+                        old_map[i] = row2["Weight_Old"].iloc[0] if not row2.empty else 0.0
+                    sum_old = np.sum(list(old_map.values()))
+                    if sum_old <= 0:
+                        sum_old = 1.0
+                    w_old = np.array([old_map.get(i,0.0) for i in range(len(col_tickers))]) / sum_old
+
+                    old_vol, old_ret = daily_vol_ret(w_old)
+                    new_vol, new_ret = daily_vol_ret(final_w)
+
+                    same_v, same_r = interpolate_frontier_for_vol(fvol, fret, old_vol)
+                    if same_v is None:
+                        st.warning("Could not interpolate frontier at Old Vol.")
+                    else:
+                        figf = plot_frontier_comparison(
+                            fvol, fret,
+                            old_vol, old_ret,
+                            new_vol, new_ret,
+                            same_v, same_r,
+                            title="Final Day Frontier: Old vs. New"
+                        )
+                        st.plotly_chart(figf)
+
 
     elif approach == "Grid Search":
         st.subheader("Grid Search (Parallel) => security-type constraints")
@@ -254,8 +328,8 @@ def main():
                 df_gs = rolling_grid_search(
                     df_prices = df_sub,
                     df_instruments = df_instruments,
-                    asset_cls_list = asset_cls_list,     # pass it here
-                    sec_type_list = sec_type_list,       # pass it here
+                    asset_cls_list = asset_cls_list,
+                    sec_type_list = sec_type_list,
                     class_sum_constraints = class_sum_constraints,
                     subtype_constraints = subtype_constraints,
                     daily_rf = daily_rf,
@@ -283,7 +357,6 @@ def main():
     else:
         st.subheader("Bayesian => security-type constraints")
         from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
-        # pass the same lists & constraints
         rolling_bayesian_optimization(
             df_prices = df_sub,
             df_instruments = df_instruments,
