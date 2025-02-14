@@ -1,5 +1,3 @@
-# File: optima_optimizer.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,30 +8,35 @@ import traceback
 from dateutil.relativedelta import relativedelta
 import concurrent.futures
 
-# scikit-optimize
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
-# 1) Module imports from your project
+# 1) Module-level imports
 from modules.optimization.cvxpy_optimizer import parametric_max_sharpe_aclass_subtype
 from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
 from modules.analytics.returns_cov import compute_performance_metrics
 from modules.analytics.weight_display import display_instrument_weight_diff, display_class_weight_diff
 from modules.analytics.constraints import get_main_constraints
 
-# 2) Import your new 12-month frontier utilities
+# 2) 12-month final frontier from efficient_frontier
 from modules.optimization.efficient_frontier import (
     compute_efficient_frontier_12m,
     interpolate_frontier_for_vol,
     plot_frontier_comparison
 )
 
-###############################################################################
-# Utility for reading Excel or Parquet
-###############################################################################
+# 3) Interval bar chart module
+from modules.backtesting.rolling_intervals import (
+    compute_interval_returns,
+    plot_interval_bars
+)
+
+##################################################
+# Excel / Parquet load
+##################################################
 def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_instruments = pd.read_excel(file, sheet_name=streamlit_sheet, header=0)
-    df_prices_raw = pd.read_excel(file, sheet_name=histo_sheet, header=0)
+    df_prices_raw  = pd.read_excel(file, sheet_name=histo_sheet, header=0)
     if df_prices_raw.columns[0] != "Date":
         df_prices_raw.rename(columns={df_prices_raw.columns[0]: "Date"}, inplace=True)
     df_prices_raw["Date"] = pd.to_datetime(df_prices_raw["Date"], errors="coerce")
@@ -59,7 +62,6 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
         tkr = row["#ID"]
         qty = row["#Quantity"]
         ticker_qty[tkr] = qty
-
     col_list = df_prices.columns
     old_shares = np.array([ticker_qty.get(c, 0.0) for c in col_list])
     vals = [np.sum(old_shares * r.values) for _, r in df_prices.iterrows()]
@@ -71,15 +73,15 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
     sr.name = "Old_Ptf"
     return sr
 
-###############################################################################
+##################################################
 # Main Streamlit App
-###############################################################################
+##################################################
 def main():
-    st.title("Optima with Security-Type Constraints (Integrated 12m Frontier)")
+    st.title("Optima with Security-Type Constraints + Interval Bars")
 
-    # -------------------------------------------------------------------------
+    ################################################
     # 1) Data Source
-    # -------------------------------------------------------------------------
+    ################################################
     approach_data = st.radio("Data Source Approach", 
                              ["One-time Convert Excel->Parquet", "Use Excel for Analysis", "Use Parquet for Analysis"])
     if approach_data == "One-time Convert Excel->Parquet":
@@ -104,9 +106,9 @@ def main():
     df_prices_clean = clean_df_prices(df_prices, coverage)
     st.write(f"**Clean data**: shape={df_prices_clean.shape}, from {df_prices_clean.index.min()} to {df_prices_clean.index.max()}")
 
-    # -------------------------------------------------------------------------
+    ################################################
     # 2) Get constraints from user
-    # -------------------------------------------------------------------------
+    ################################################
     main_constr = get_main_constraints(df_instruments, df_prices_clean)
     user_start = main_constr["user_start"]
     constraint_mode = main_constr["constraint_mode"]
@@ -118,9 +120,9 @@ def main():
     transaction_cost_value = main_constr["transaction_cost_value"]
     trade_buffer_pct = main_constr["trade_buffer_pct"]
 
-    # -------------------------------------------------------------------------
+    ################################################
     # 3) Build old portfolio weights
-    # -------------------------------------------------------------------------
+    ################################################
     df_instruments["Value"] = df_instruments["#Quantity"] * df_instruments["#Last_Price"]
     tot_val = df_instruments["Value"].sum()
     if tot_val <= 0:
@@ -128,7 +130,7 @@ def main():
         df_instruments.loc[df_instruments.index[0], "Value"] = 1.0
     df_instruments["Weight_Old"] = df_instruments["Value"] / tot_val
 
-    # If keep_current => override class constraints with oldW +/- buffer
+    # If keep_current => override class constraints with old portfolio +/- buffer
     if constraint_mode == "keep_current":
         class_old_w = df_instruments.groupby("#Asset")["Weight_Old"].sum()
         for cl in df_instruments["#Asset"].unique():
@@ -137,9 +139,9 @@ def main():
             mx = min(1.0, oldw + buffer_pct)
             class_sum_constraints[cl] = {"min_class_weight": mn, "max_class_weight": mx}
 
-    # -------------------------------------------------------------------------
+    ################################################
     # 4) Subset from user_start
-    # -------------------------------------------------------------------------
+    ################################################
     df_sub = df_prices_clean.loc[pd.Timestamp(user_start):]
     if len(df_sub) < 2:
         st.error("Not enough data from the selected start date.")
@@ -165,11 +167,11 @@ def main():
             asset_cls_list.append("Unknown")
             sec_type_list.append("Unknown")
 
-    # -------------------------------------------------------------------------
-    # 5) Analysis Approach
-    # -------------------------------------------------------------------------
     approach = st.radio("Analysis Approach", ["Manual Single Rolling", "Grid Search", "Bayesian Optimization"], index=0)
 
+    ################################################
+    # Manual Single Rolling
+    ################################################
     if approach == "Manual Single Rolling":
         rebal_freq = st.selectbox("Rebalance Frequency (months)", [1, 3, 6], index=0)
         lookback_m = st.selectbox("Lookback Window (months)", [3, 6, 12], index=0)
@@ -188,9 +190,6 @@ def main():
 
         n_points_man = st.number_input("Frontier #points", 5, 100, 15, step=5)
 
-        # ---------------------------------------------------------------------
-        # Run Rolling
-        # ---------------------------------------------------------------------
         if st.button("Run Rolling (Manual)"):
 
             def param_sharpe_fn(sub_ret: pd.DataFrame):
@@ -215,6 +214,7 @@ def main():
                 )
                 return w_opt, summary
 
+            # Rolling backtest
             from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
             sr_line, final_w, old_w_last, final_rebal_date, df_rebal = rolling_backtest_monthly_param_sharpe(
                 df_prices = df_sub,
@@ -232,11 +232,13 @@ def main():
             st.write("### Rebalance Debug Table")
             st.dataframe(df_rebal)
 
-            # Compare old vs new lines
+            # Build old vs new daily lines
             old_line = build_old_portfolio_line(df_instruments, df_sub)
             idx_all = old_line.index.union(sr_line.index)
             old_line_u = old_line.reindex(idx_all, method="ffill")
             new_line_u = sr_line.reindex(idx_all, method="ffill")
+
+            # Plot cumulative line chart
             old0 = old_line_u.iloc[0]
             new0 = new_line_u.iloc[0]
             df_cum = pd.DataFrame({
@@ -245,19 +247,57 @@ def main():
             }, index=idx_all)
             st.line_chart(df_cum)
 
+            # Performance metrics
             perf_old = compute_performance_metrics(old_line_u * old0, daily_rf=daily_rf)
             perf_new = compute_performance_metrics(new_line_u * new0, daily_rf=daily_rf)
             df_perf = pd.DataFrame({"Old": perf_old, "New": perf_new})
             st.write("**Performance**:")
             st.dataframe(df_perf)
 
+            # Weighted difference tables
             display_instrument_weight_diff(df_instruments, col_tickers, final_w)
             display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
             # -----------------------------------------------------------------
-            # 6) Show 12-month Frontier => apples-to-apples vs old/new
+            # Interval Returns: Bar Chart
             # -----------------------------------------------------------------
-            # We'll build a weight array for the old portfolio:
+            # We'll build a list of rebal dates from df_rebal["Date"] plus the final day
+            rebal_dates = df_rebal["Date"].unique().tolist()
+            rebal_dates.sort()
+            # Ensure start is sr_line.index[0] if not present
+            first_day = sr_line.index[0]
+            if rebal_dates[0] > first_day:
+                rebal_dates = [first_day] + rebal_dates
+            # Ensure final day is the last day of sr_line
+            last_day = sr_line.index[-1]
+            if rebal_dates[-1] < last_day:
+                rebal_dates.append(last_day)
+
+            from modules.backtesting.rolling_intervals import compute_interval_returns, plot_interval_bars
+            df_intervals = compute_interval_returns(
+                sr_line_old=old_line_u,
+                sr_line_new=new_line_u,
+                rebal_dates=rebal_dates,
+                label_old="Old",
+                label_new="New"
+            )
+            st.write("### Interval Returns Table")
+            st.dataframe(df_intervals)
+
+            # difference or grouped
+            mode_choice = st.selectbox("Interval Chart Mode", ["difference", "grouped"], index=1)
+            fig_intervals = plot_interval_bars(
+                df_intervals,
+                label_old="Old(%)",
+                label_new="New(%)",
+                display_mode=mode_choice
+            )
+            st.plotly_chart(fig_intervals)
+
+            # -----------------------------------------------------------------
+            # 12-month Frontier
+            # -----------------------------------------------------------------
+            # We'll build w_old array to compare on the short-window frontier
             old_map = {}
             for i, tk in enumerate(col_tickers):
                 row2 = df_instruments[df_instruments["#ID"] == tk]
@@ -270,10 +310,9 @@ def main():
                 sum_old = 1.0
             w_old = np.array([old_map[i] for i in range(len(col_tickers))]) / sum_old
 
-            # compute 12m frontier
             from modules.optimization.efficient_frontier import compute_efficient_frontier_12m
             fvol, fret = compute_efficient_frontier_12m(
-                df_prices=df_sub,                # entire sub timeframe's prices
+                df_prices=df_sub,
                 df_instruments=df_instruments,
                 do_shrink_means=do_shrink_means,
                 alpha=alpha_shrink,
@@ -286,14 +325,12 @@ def main():
                 class_constraints=class_sum_constraints,
                 col_tickers=col_tickers,
                 n_points=50,
-                final_w=final_w   # so we include final_w's target return
+                final_w=final_w
             )
-
             if len(fvol) == 0:
                 st.warning("No feasible frontier from 12m data.")
             else:
-                # Evaluate old/new portfolios over the same 12m window => apples to apples
-                # Subset last 252 rows (or fewer if not enough data)
+                # Evaluate old/new on same 12m
                 if len(df_sub) > 252:
                     df_12m = df_sub.iloc[-252:].copy()
                 else:
@@ -310,6 +347,7 @@ def main():
                 old_vol, old_ret = daily_vol_ret(w_old)
                 new_vol, new_ret = daily_vol_ret(final_w)
 
+                from modules.optimization.efficient_frontier import interpolate_frontier_for_vol, plot_frontier_comparison
                 same_v, same_r = interpolate_frontier_for_vol(fvol, fret, old_vol)
                 if same_v is None:
                     st.warning("Could not interpolate frontier at Old Vol.")
@@ -323,6 +361,9 @@ def main():
                     )
                     st.plotly_chart(figf)
 
+    ################################################
+    # Grid Search
+    ################################################
     elif approach == "Grid Search":
         st.subheader("Grid Search (Parallel) => security-type constraints")
         frontier_points_list = st.multiselect("Frontier Points (n_points)", [5,10,15,20,30], [5,10,15])
@@ -339,48 +380,51 @@ def main():
             else:
                 from modules.backtesting.rolling_monthly import rolling_grid_search
                 df_gs = rolling_grid_search(
-                    df_prices = df_sub,
-                    df_instruments = df_instruments,
-                    asset_cls_list = asset_cls_list,
-                    sec_type_list = sec_type_list,
-                    class_sum_constraints = class_sum_constraints,
-                    subtype_constraints = subtype_constraints,
-                    daily_rf = daily_rf,
-                    frontier_points_list = frontier_points_list,
-                    alpha_list = alpha_list,
-                    beta_list = beta_list,
-                    rebal_freq_list = rebal_freq_list,
-                    lookback_list = lookback_list,
-                    transaction_cost_value = transaction_cost_value,
-                    transaction_cost_type = cost_type,
-                    trade_buffer_pct = trade_buffer_pct,
-                    do_shrink_means = True,
-                    do_shrink_cov = True,
-                    reg_cov = False,
-                    do_ledoitwolf = False,
-                    do_ewm = False,
-                    ewm_alpha = 0.06,
-                    max_workers = max_workers
+                    df_prices=df_sub,
+                    df_instruments=df_instruments,
+                    asset_cls_list=asset_cls_list,
+                    sec_type_list=sec_type_list,
+                    class_sum_constraints=class_sum_constraints,
+                    subtype_constraints=subtype_constraints,
+                    daily_rf=daily_rf,
+                    frontier_points_list=frontier_points_list,
+                    alpha_list=alpha_list,
+                    beta_list=beta_list,
+                    rebal_freq_list=rebal_freq_list,
+                    lookback_list=lookback_list,
+                    transaction_cost_value=transaction_cost_value,
+                    transaction_cost_type=cost_type,
+                    trade_buffer_pct=trade_buffer_pct,
+                    do_shrink_means=True,
+                    do_shrink_cov=True,
+                    reg_cov=False,
+                    do_ledoitwolf=False,
+                    do_ewm=False,
+                    ewm_alpha=0.06,
+                    max_workers=max_workers
                 )
                 st.dataframe(df_gs)
                 best_ = df_gs.sort_values("Sharpe Ratio", ascending=False).head(5)
                 st.write("**Top 5**:")
                 st.dataframe(best_)
 
+    ################################################
+    # Bayesian
+    ################################################
     else:
         st.subheader("Bayesian => security-type constraints")
         from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
         rolling_bayesian_optimization(
-            df_prices = df_sub,
-            df_instruments = df_instruments,
-            asset_cls_list = asset_cls_list,
-            sec_type_list = sec_type_list,
-            class_sum_constraints = class_sum_constraints,
-            subtype_constraints = subtype_constraints,
-            daily_rf = daily_rf,
-            transaction_cost_value = transaction_cost_value,
-            transaction_cost_type = cost_type,
-            trade_buffer_pct = trade_buffer_pct
+            df_prices=df_sub,
+            df_instruments=df_instruments,
+            asset_cls_list=asset_cls_list,
+            sec_type_list=sec_type_list,
+            class_sum_constraints=class_sum_constraints,
+            subtype_constraints=subtype_constraints,
+            daily_rf=daily_rf,
+            transaction_cost_value=transaction_cost_value,
+            transaction_cost_type=cost_type,
+            trade_buffer_pct=trade_buffer_pct
         )
 
 if __name__ == "__main__":
