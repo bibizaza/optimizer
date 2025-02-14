@@ -34,47 +34,48 @@ def rolling_bayesian_optimization(
     """
     st.write("## Bayesian Optimization")
 
-    # How many total evaluations to do
+    # 1) Number of Bayesian evaluations
     n_calls = st.number_input("Number of Bayesian evaluations (n_calls)", 5, 100, 20, step=5)
 
     st.write("### Parameter Ranges")
-    # 1) n_points range
+    # 2) n_points range
     c1, c2 = st.columns(2)
     with c1:
         min_npts = st.number_input("Min n_points", 1, 999, 5, step=5)
     with c2:
         max_npts = st.number_input("Max n_points", 1, 999, 100, step=5)
 
-    # 2) alpha range
+    # 3) alpha (mean shrink) range
     alpha_min = st.slider("Alpha min (mean shrink)", 0.0, 1.0, 0.0, 0.05)
     alpha_max = st.slider("Alpha max (mean shrink)", 0.0, 1.0, 1.0, 0.05)
 
-    # 3) beta range
+    # 4) beta (cov shrink) range
     beta_min = st.slider("Beta min (cov shrink)", 0.0, 1.0, 0.0, 0.05)
     beta_max = st.slider("Beta max (cov shrink)", 0.0, 1.0, 1.0, 0.05)
 
-    # 4) possible rebal frequencies
+    # 5) possible rebal frequencies
     freq_choices = st.multiselect("Possible Rebal Frequencies (months)", [1,3,6], default=[1,3,6])
     if not freq_choices:
         freq_choices = [1]
-    # 5) possible lookback windows
+    # 6) possible lookback windows
     lb_choices = st.multiselect("Possible Lookback Windows (months)", [3,6,12], default=[3,6,12])
     if not lb_choices:
         lb_choices = [3]
 
     st.write("### EWM Covariance")
-    # 6) do_ewm => True/False
+    # 7) do_ewm => True/False
     ewm_bool_choices = st.multiselect("Use EWM Cov?", [False, True], default=[False, True])
     if not ewm_bool_choices:
         ewm_bool_choices = [False]
-    # 7) ewm_alpha range
+    # 8) ewm_alpha range
     ewm_alpha_min = st.slider("EWM alpha min", 0.0, 1.0, 0.0, 0.05)
     ewm_alpha_max = st.slider("EWM alpha max", 0.0, 1.0, 1.0, 0.05)
 
     # We'll store all tries in a list
     tries_list = []
 
-    # Build param space for scikit-optimize. Each point x => [n_points, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_]
+    # Build param space for scikit-optimize
+    # x => [n_points, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_]
     space = [
         Integer(int(min_npts), int(max_npts), name="n_points"),
         Real(alpha_min, alpha_max, name="alpha_"),
@@ -91,7 +92,7 @@ def rolling_bayesian_optimization(
     start_time = time.time()
 
     def on_step(res):
-        # Called after each iteration completes
+        """Callback after each iteration."""
         done = len(res.x_iters)
         pct = int(done * 100 / n_calls)
         elapsed = time.time() - start_time
@@ -102,16 +103,22 @@ def rolling_bayesian_optimization(
         """
         x => [n_points, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_]
         """
-        combo = tuple(x)  # to store in logs
+        combo = tuple(x)  # track raw combo
         n_points_ = x[0]
-        alpha_ = x[1]
-        beta_ = x[2]
+        alpha_ = x[1]    # can be 0 => no mean shrink
+        beta_ = x[2]     # can be 0 => no cov shrink
         freq_ = x[3]
-        lb_ = x[4]
-        do_ewm_ = x[5]
-        ewm_alpha_ = x[6]
+        lb_   = x[4]
+        do_ewm_ = x[5]   # bool => use EWM or not
+        ewm_alpha_ = x[6] # if do_ewm_=True, must be >0
 
-        # Send them all to run_one_combo
+        # If do_ewm_ is True but ewm_alpha_ <= 0 => clamp to 1e-6 so Pandas won't error
+        if do_ewm_ and ewm_alpha_ <= 0:
+            ewm_alpha_ = 1e-6
+        elif do_ewm_ and ewm_alpha_ > 1:
+            ewm_alpha_ = 1.0
+
+        # Now run one combo
         result = run_one_combo(
             df_prices = df_prices,
             df_instruments = df_instruments,
@@ -126,15 +133,15 @@ def rolling_bayesian_optimization(
             trade_buffer_pct = trade_buffer_pct,
             use_michaud = False,
             n_boot = 10,
-            do_shrink_means = True,
-            do_shrink_cov = True,
+            do_shrink_means = True,  # we allow alpha=0 => no shrink
+            do_shrink_cov = True,    # we allow beta=0 => no shrink
             reg_cov = False,
             do_ledoitwolf = False,
             do_ewm = do_ewm_,
             ewm_alpha = ewm_alpha_
         )
 
-        # Keep track of results in tries_list
+        # Log
         tries_list.append({
             "n_points":     n_points_,
             "alpha":        alpha_,
@@ -162,12 +169,11 @@ def rolling_bayesian_optimization(
             objective,
             space,
             n_calls=n_calls,
-            random_state=42,  # fix seed for reproducibility if desired
+            random_state=42,
             callback=[on_step]
         )
 
     df_out = pd.DataFrame(tries_list)
-    # Show best result
     if not df_out.empty:
         best_idx = df_out["Sharpe Ratio"].idxmax()
         best_row = df_out.loc[best_idx]
