@@ -10,26 +10,30 @@ import traceback
 from dateutil.relativedelta import relativedelta
 import concurrent.futures
 
+# scikit-optimize
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
-# Module-level imports from our project modules:
+# 1) Module imports from your project
 from modules.optimization.cvxpy_optimizer import parametric_max_sharpe_aclass_subtype
 from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
 from modules.analytics.returns_cov import compute_performance_metrics
 from modules.analytics.weight_display import display_instrument_weight_diff, display_class_weight_diff
 from modules.analytics.constraints import get_main_constraints
 
-# NEW: Import your efficient_frontier functions
+# 2) Import your new 12-month frontier utilities
 from modules.optimization.efficient_frontier import (
-    compute_efficient_frontier_cvxpy,
+    compute_efficient_frontier_12m,
     interpolate_frontier_for_vol,
     plot_frontier_comparison
 )
 
+###############################################################################
+# Utility for reading Excel or Parquet
+###############################################################################
 def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_instruments = pd.read_excel(file, sheet_name=streamlit_sheet, header=0)
-    df_prices_raw  = pd.read_excel(file, sheet_name=histo_sheet, header=0)
+    df_prices_raw = pd.read_excel(file, sheet_name=histo_sheet, header=0)
     if df_prices_raw.columns[0] != "Date":
         df_prices_raw.rename(columns={df_prices_raw.columns[0]: "Date"}, inplace=True)
     df_prices_raw["Date"] = pd.to_datetime(df_prices_raw["Date"], errors="coerce")
@@ -40,10 +44,6 @@ def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     return df_instruments, df_prices_raw
 
 def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
-    """
-    Removes rows where the fraction of non-null cells < min_coverage.
-    Then ffill/bfill to fill remaining NaNs.
-    """
     df_prices = df_prices.copy()
     coverage = df_prices.notna().sum(axis=1)
     n_cols = df_prices.shape[1]
@@ -53,10 +53,6 @@ def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     return df_prices
 
 def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> pd.Series:
-    """
-    Creates a time series for the old portfolio's performance, given #Quantity.
-    Normalizes it to 1 at the first date.
-    """
     df_prices = df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
     ticker_qty = {}
     for _, row in df_instruments.iterrows():
@@ -75,10 +71,15 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
     sr.name = "Old_Ptf"
     return sr
 
+###############################################################################
+# Main Streamlit App
+###############################################################################
 def main():
-    st.title("Optima with Security-Type Constraints")
+    st.title("Optima with Security-Type Constraints (Integrated 12m Frontier)")
 
-    # 1) Data Source Selection
+    # -------------------------------------------------------------------------
+    # 1) Data Source
+    # -------------------------------------------------------------------------
     approach_data = st.radio("Data Source Approach", 
                              ["One-time Convert Excel->Parquet", "Use Excel for Analysis", "Use Parquet for Analysis"])
     if approach_data == "One-time Convert Excel->Parquet":
@@ -103,19 +104,23 @@ def main():
     df_prices_clean = clean_df_prices(df_prices, coverage)
     st.write(f"**Clean data**: shape={df_prices_clean.shape}, from {df_prices_clean.index.min()} to {df_prices_clean.index.max()}")
 
-    # 2) Get constraints from the UI
+    # -------------------------------------------------------------------------
+    # 2) Get constraints from user
+    # -------------------------------------------------------------------------
     main_constr = get_main_constraints(df_instruments, df_prices_clean)
     user_start = main_constr["user_start"]
     constraint_mode = main_constr["constraint_mode"]
     buffer_pct = main_constr["buffer_pct"]
-    class_sum_constraints = main_constr["class_sum_constraints"]  # dict: {className: {min_class_weight, max_class_weight}}
-    subtype_constraints = main_constr["subtype_constraints"]      # dict: {(class,secType): {min_instrument, max_instrument}}
+    class_sum_constraints = main_constr["class_sum_constraints"]
+    subtype_constraints = main_constr["subtype_constraints"]
     daily_rf = main_constr["daily_rf"]
     cost_type = main_constr["cost_type"]
     transaction_cost_value = main_constr["transaction_cost_value"]
     trade_buffer_pct = main_constr["trade_buffer_pct"]
 
+    # -------------------------------------------------------------------------
     # 3) Build old portfolio weights
+    # -------------------------------------------------------------------------
     df_instruments["Value"] = df_instruments["#Quantity"] * df_instruments["#Last_Price"]
     tot_val = df_instruments["Value"].sum()
     if tot_val <= 0:
@@ -123,7 +128,7 @@ def main():
         df_instruments.loc[df_instruments.index[0], "Value"] = 1.0
     df_instruments["Weight_Old"] = df_instruments["Value"] / tot_val
 
-    # 4) If 'keep_current' mode => override class_sum_constraints with old portfolio +/- buffer
+    # If keep_current => override class constraints with oldW +/- buffer
     if constraint_mode == "keep_current":
         class_old_w = df_instruments.groupby("#Asset")["Weight_Old"].sum()
         for cl in df_instruments["#Asset"].unique():
@@ -132,16 +137,17 @@ def main():
             mx = min(1.0, oldw + buffer_pct)
             class_sum_constraints[cl] = {"min_class_weight": mn, "max_class_weight": mx}
 
-    # 5) Subset the price data from user_start
+    # -------------------------------------------------------------------------
+    # 4) Subset from user_start
+    # -------------------------------------------------------------------------
     df_sub = df_prices_clean.loc[pd.Timestamp(user_start):]
     if len(df_sub) < 2:
         st.error("Not enough data from the selected start date.")
         st.stop()
 
     col_tickers = df_sub.columns.tolist()
-    have_sec_type = ("#Security_Type" in df_instruments.columns)
+    have_sec_type = "#Security_Type" in df_instruments.columns
 
-    # Build lists: asset_cls_list, sec_type_list for each ticker
     asset_cls_list = []
     sec_type_list = []
     for tk in col_tickers:
@@ -159,6 +165,9 @@ def main():
             asset_cls_list.append("Unknown")
             sec_type_list.append("Unknown")
 
+    # -------------------------------------------------------------------------
+    # 5) Analysis Approach
+    # -------------------------------------------------------------------------
     approach = st.radio("Analysis Approach", ["Manual Single Rolling", "Grid Search", "Bayesian Optimization"], index=0)
 
     if approach == "Manual Single Rolling":
@@ -179,10 +188,12 @@ def main():
 
         n_points_man = st.number_input("Frontier #points", 5, 100, 15, step=5)
 
+        # ---------------------------------------------------------------------
+        # Run Rolling
+        # ---------------------------------------------------------------------
         if st.button("Run Rolling (Manual)"):
 
             def param_sharpe_fn(sub_ret: pd.DataFrame):
-                # Calls your parametric_max_sharpe_aclass_subtype solver
                 w_opt, summary = parametric_max_sharpe_aclass_subtype(
                     df_returns = sub_ret,
                     tickers = col_tickers,
@@ -217,9 +228,11 @@ def main():
                 transaction_cost_type = cost_type,
                 trade_buffer_pct = trade_buffer_pct
             )
+
             st.write("### Rebalance Debug Table")
             st.dataframe(df_rebal)
 
+            # Compare old vs new lines
             old_line = build_old_portfolio_line(df_instruments, df_sub)
             idx_all = old_line.index.union(sr_line.index)
             old_line_u = old_line.reindex(idx_all, method="ffill")
@@ -227,8 +240,8 @@ def main():
             old0 = old_line_u.iloc[0]
             new0 = new_line_u.iloc[0]
             df_cum = pd.DataFrame({
-                "Old(%)": (old_line_u / old0 - 1)*100,
-                "New(%)": (new_line_u / new0 - 1)*100
+                "Old(%)": (old_line_u/old0 - 1)*100,
+                "New(%)": (new_line_u/new0 - 1)*100
             }, index=idx_all)
             st.line_chart(df_cum)
 
@@ -241,74 +254,74 @@ def main():
             display_instrument_weight_diff(df_instruments, col_tickers, final_w)
             display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
-            ############################################################################
-            # ADD: Final-day Frontier
-            ############################################################################
-            if final_rebal_date is not None:
-                # We'll compute the frontier using the final day's lookback window
-                start_final = final_rebal_date - pd.Timedelta(days=window_days)
-                # in case start_final < earliest date
-                start_final = max(df_sub.index[0], start_final)
-                df_final_ret = df_sub.loc[start_final:final_rebal_date].pct_change().fillna(0.0)
-
-                # call your frontier function
-                fvol, fret = compute_efficient_frontier_cvxpy(
-                    df_returns=df_final_ret,
-                    n_points=50,
-                    clamp_min_return=0.0,
-                    remove_dominated=True,
-                    do_shrink_means=do_shrink_means,
-                    alpha=alpha_shrink,
-                    do_shrink_cov=do_shrink_cov,
-                    beta=beta_shrink,
-                    use_ledoitwolf=do_ledoitwolf,
-                    do_ewm=do_ewm,
-                    ewm_alpha=ewm_alpha,
-                    regularize_cov=reg_cov,
-                    final_w=final_w,  # just so it includes final_w's return
-                    class_constraints=class_sum_constraints,
-                    col_tickers=col_tickers,
-                    df_instruments=df_instruments
-                )
-
-                if len(fvol) == 0:
-                    st.warning("Efficient frontier is empty under these constraints.")
+            # -----------------------------------------------------------------
+            # 6) Show 12-month Frontier => apples-to-apples vs old/new
+            # -----------------------------------------------------------------
+            # We'll build a weight array for the old portfolio:
+            old_map = {}
+            for i, tk in enumerate(col_tickers):
+                row2 = df_instruments[df_instruments["#ID"] == tk]
+                if not row2.empty:
+                    old_map[i] = row2["Weight_Old"].iloc[0]
                 else:
-                    # We'll do a quick daily vol/ret for old vs new
-                    # from the same final period
-                    cov_final = df_final_ret.cov().values
-                    mean_final = df_final_ret.mean().values
-                    def daily_vol_ret(w):
-                        v = np.sqrt(w @ cov_final @ w) * np.sqrt(252)
-                        r = (mean_final @ w) * 252
-                        return v, r
+                    old_map[i] = 0.0
+            sum_old = np.sum(list(old_map.values()))
+            if sum_old <= 0:
+                sum_old = 1.0
+            w_old = np.array([old_map[i] for i in range(len(col_tickers))]) / sum_old
 
-                    # old portfolio weights => from df_instruments["Weight_Old"]
-                    old_map = {}
-                    for i, tkr in enumerate(col_tickers):
-                        row2 = df_instruments[df_instruments["#ID"] == tkr]
-                        old_map[i] = row2["Weight_Old"].iloc[0] if not row2.empty else 0.0
-                    sum_old = np.sum(list(old_map.values()))
-                    if sum_old <= 0:
-                        sum_old = 1.0
-                    w_old = np.array([old_map.get(i,0.0) for i in range(len(col_tickers))]) / sum_old
+            # compute 12m frontier
+            from modules.optimization.efficient_frontier import compute_efficient_frontier_12m
+            fvol, fret = compute_efficient_frontier_12m(
+                df_prices=df_sub,                # entire sub timeframe's prices
+                df_instruments=df_instruments,
+                do_shrink_means=do_shrink_means,
+                alpha=alpha_shrink,
+                do_shrink_cov=do_shrink_cov,
+                beta=beta_shrink,
+                use_ledoitwolf=do_ledoitwolf,
+                do_ewm=do_ewm,
+                ewm_alpha=ewm_alpha,
+                regularize_cov=reg_cov,
+                class_constraints=class_sum_constraints,
+                col_tickers=col_tickers,
+                n_points=50,
+                final_w=final_w   # so we include final_w's target return
+            )
 
-                    old_vol, old_ret = daily_vol_ret(w_old)
-                    new_vol, new_ret = daily_vol_ret(final_w)
+            if len(fvol) == 0:
+                st.warning("No feasible frontier from 12m data.")
+            else:
+                # Evaluate old/new portfolios over the same 12m window => apples to apples
+                # Subset last 252 rows (or fewer if not enough data)
+                if len(df_sub) > 252:
+                    df_12m = df_sub.iloc[-252:].copy()
+                else:
+                    df_12m = df_sub.copy()
+                ret_12m = df_12m.pct_change().fillna(0.0)
+                mean_12m = ret_12m.mean().values
+                cov_12m  = ret_12m.cov().values
 
-                    same_v, same_r = interpolate_frontier_for_vol(fvol, fret, old_vol)
-                    if same_v is None:
-                        st.warning("Could not interpolate frontier at Old Vol.")
-                    else:
-                        figf = plot_frontier_comparison(
-                            fvol, fret,
-                            old_vol, old_ret,
-                            new_vol, new_ret,
-                            same_v, same_r,
-                            title="Final Day Frontier: Old vs. New"
-                        )
-                        st.plotly_chart(figf)
+                def daily_vol_ret(w):
+                    v = np.sqrt(w @ cov_12m @ w) * np.sqrt(252)
+                    r = (mean_12m @ w) * 252
+                    return v, r
 
+                old_vol, old_ret = daily_vol_ret(w_old)
+                new_vol, new_ret = daily_vol_ret(final_w)
+
+                same_v, same_r = interpolate_frontier_for_vol(fvol, fret, old_vol)
+                if same_v is None:
+                    st.warning("Could not interpolate frontier at Old Vol.")
+                else:
+                    figf = plot_frontier_comparison(
+                        fvol, fret,
+                        old_vol, old_ret,
+                        new_vol, new_ret,
+                        same_v, same_r,
+                        title="12-Month Frontier: Old vs New"
+                    )
+                    st.plotly_chart(figf)
 
     elif approach == "Grid Search":
         st.subheader("Grid Search (Parallel) => security-type constraints")
