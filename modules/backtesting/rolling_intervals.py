@@ -1,7 +1,7 @@
-# modules/backtesting/rolling_intervals.py
+# File: modules/backtesting/rolling_intervals.py
 
+import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
 
 def compute_interval_returns(
@@ -12,55 +12,22 @@ def compute_interval_returns(
     label_new: str = "New"
 ) -> pd.DataFrame:
     """
-    Given two daily cumulative performance lines (sr_line_old, sr_line_new)
-    and a list of sorted rebal_dates, compute the interval returns for each portfolio
-    between each pair of consecutive rebalancing dates.
-
-    Parameters
-    ----------
-    sr_line_old : pd.Series
-        Daily cumulative performance for the old portfolio (e.g. from rolling backtest),
-        indexed by date.
-    sr_line_new : pd.Series
-        Same but for the new/optimized portfolio.
-    rebal_dates : list of pd.Timestamp
-        The sorted list of rebalancing dates used in the rolling backtest.
-        Typically something like [start_day, rebal1, rebal2, ..., final_day].
-        Must exist in sr_line_* indexes, or at least be consistent with them.
-    label_old : str
-        The label for the old portfolio (default "Old").
-    label_new : str
-        The label for the new portfolio (default "New").
-
-    Returns
-    -------
-    df_intervals : pd.DataFrame
-        Columns:
-          - "Interval Start"
-          - "Interval End"
-          - f"{label_old}(%)"
-          - f"{label_new}(%)"
-          - "Diff(%)" => (new - old) * 100
+    Computes interval returns for old vs new between consecutive rebalancing dates.
+    Each row => "Interval Start", "Interval End", label_old+"(%)", label_new+"(%)", "Diff(%)"
     """
     rows = []
-    # Ensure rebal_dates is sorted and unique
     rebal_dates_sorted = sorted(list(set(rebal_dates)))
-    # We'll also ensure any final date is included if needed
-    # but typically your rolling backtest already has final date as last rebalance.
 
     for i in range(len(rebal_dates_sorted) - 1):
         start_d = rebal_dates_sorted[i]
         end_d   = rebal_dates_sorted[i + 1]
 
-        # subset old/new lines to [start_d, end_d]
         sub_old = sr_line_old.loc[start_d:end_d]
         sub_new = sr_line_new.loc[start_d:end_d]
 
-        # If missing data or less than 2 points, skip
         if len(sub_old) < 2 or len(sub_new) < 2:
             continue
 
-        # interval return => last/first - 1
         ret_old = sub_old.iloc[-1] / sub_old.iloc[0] - 1
         ret_new = sub_new.iloc[-1] / sub_new.iloc[0] - 1
 
@@ -72,44 +39,25 @@ def compute_interval_returns(
             "Diff(%)": (ret_new - ret_old) * 100
         })
 
-    df_intervals = pd.DataFrame(rows)
-    return df_intervals
+    return pd.DataFrame(rows)
 
 def plot_interval_bars(
     df_intervals: pd.DataFrame,
     label_old: str = "Old(%)",
     label_new: str = "New(%)",
-    display_mode: str = "difference"
+    display_mode: str = "grouped"
 ):
     """
-    Create a Plotly bar chart from the df_intervals produced by compute_interval_returns.
+    Create a Plotly bar chart for interval returns.
 
-    Parameters
-    ----------
-    df_intervals : pd.DataFrame
-        Must have columns like ["Interval Start", "Interval End", label_old, label_new, "Diff(%)"].
-    label_old : str
-        The column name for old portfolio returns in percent.
-    label_new : str
-        Column name for new portfolio returns in percent.
-    display_mode : str
-        "difference" => shows one bar per interval => "Diff(%)"
-        "grouped"    => shows two bars => old vs. new.
-
-    Returns
-    -------
-    fig : plotly.graph_objects.Figure
-        A bar chart figure ready for st.plotly_chart(fig).
+    display_mode => "difference" => one bar per interval => "Diff(%)"
+                 => "grouped"    => side-by-side bars for old vs new
     """
-    import plotly.express as px
-
     if display_mode == "difference":
-        # Single bar for each interval => difference
         if "Diff(%)" not in df_intervals.columns:
             raise ValueError("df_intervals must have 'Diff(%)' column for difference mode.")
-
         df_plot = df_intervals.copy()
-        df_plot["Interval"] = df_plot["Interval Start"].astype(str)  # or combine Start/End
+        df_plot["Interval"] = df_plot["Interval Start"].astype(str)
         fig = px.bar(
             df_plot,
             x="Interval",
@@ -131,7 +79,6 @@ def plot_interval_bars(
 
         df_plot = df_intervals.copy()
         df_plot["Interval"] = df_plot["Interval Start"].astype(str)
-        # melt to have variable column = "Portfolio", value column = "Return(%)"
         df_melt = df_plot.melt(
             id_vars=["Interval", "Interval End"],
             value_vars=[label_old, label_new],
@@ -152,3 +99,98 @@ def plot_interval_bars(
 
     else:
         raise ValueError("display_mode must be 'difference' or 'grouped'")
+
+def compute_interval_stats(
+    df_intervals: pd.DataFrame,
+    diff_col: str = "Diff(%)"
+) -> dict:
+    """
+    Compute summary metrics from df_intervals (which has 'Diff(%)'):
+      - Number of intervals
+      - Win Count
+      - Win Rate(%)
+      - Average Diff(%)
+      - Median Diff(%)
+      - Max Diff(%)
+      - Min Diff(%)
+      - Average Positive Diff(%)
+      - Average Negative Diff(%)
+    """
+    if diff_col not in df_intervals.columns:
+        raise ValueError(f"df_intervals must have '{diff_col}' column for stats.")
+
+    diffs = df_intervals[diff_col]
+    n_intervals = len(diffs)
+    if n_intervals == 0:
+        return {
+            "Number of Intervals": 0,
+            "Win Count": 0,
+            "Win Rate(%)": 0.0,
+            "Average Diff(%)": 0.0,
+            "Median Diff(%)": 0.0,
+            "Max Diff(%)": 0.0,
+            "Min Diff(%)": 0.0,
+            "Average Positive Diff(%)": 0.0,
+            "Average Negative Diff(%)": 0.0
+        }
+
+    wins = diffs[diffs > 0]
+    lose = diffs[diffs < 0]
+    n_win = len(wins)
+    win_rate = 100.0 * n_win / n_intervals
+
+    avg_diff = diffs.mean()
+    med_diff = diffs.median()
+    max_diff = diffs.max()
+    min_diff = diffs.min()
+
+    avg_positive = wins.mean() if len(wins) > 0 else 0.0
+    avg_negative = lose.mean() if len(lose) > 0 else 0.0
+
+    stats = {
+        "Number of Intervals": n_intervals,
+        "Win Count": n_win,
+        "Win Rate(%)": round(win_rate, 2),
+        "Average Diff(%)": round(avg_diff, 3),
+        "Median Diff(%)": round(med_diff, 3),
+        "Max Diff(%)": round(max_diff, 3),
+        "Min Diff(%)": round(min_diff, 3),
+        "Average Positive Diff(%)": round(avg_positive, 3),
+        "Average Negative Diff(%)": round(avg_negative, 3)
+    }
+    return stats
+
+def display_interval_bars_and_stats(
+    sr_line_old: pd.Series,
+    sr_line_new: pd.Series,
+    rebal_dates: list[pd.Timestamp],
+    label_old: str = "Old",
+    label_new: str = "New",
+    display_mode: str = "grouped"
+):
+    """
+    High-level function that:
+     1) Computes interval returns,
+     2) Plots a bar chart,
+     3) Shows summary stats (win rate, avg diff, etc.) in a small table below.
+
+    This keeps optima_optimizer.py simpler:
+     - Just call display_interval_bars_and_stats(...) once you have sr_line_old, sr_line_new, rebal_dates
+    """
+    # 1) Compute intervals
+    df_intervals = compute_interval_returns(sr_line_old, sr_line_new, rebal_dates, label_old, label_new)
+
+    # 2) Build bar chart
+    fig = plot_interval_bars(
+        df_intervals=df_intervals,
+        label_old=f"{label_old}(%)",
+        label_new=f"{label_new}(%)",
+        display_mode=display_mode
+    )
+    st.plotly_chart(fig)
+
+    # 3) Summaries
+    stats_dict = compute_interval_stats(df_intervals, diff_col="Diff(%)")
+    df_stats = pd.DataFrame([stats_dict])
+    st.write("### Interval Stats")
+    st.table(df_stats)
