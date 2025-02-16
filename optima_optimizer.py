@@ -228,8 +228,8 @@ def main():
                 trade_buffer_pct = trade_buffer_pct
             )
 
-            st.write("### Rebalance Debug Table")
-            st.dataframe(df_rebal)
+            #st.write("### Rebalance Debug Table")
+            #st.dataframe(df_rebal)
 
             # Build daily lines for old vs. new
             old_line = build_old_portfolio_line(df_instruments, df_sub)
