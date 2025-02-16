@@ -13,7 +13,7 @@ import concurrent.futures
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
-# 1) Our modules
+# 1) Our custom modules
 from modules.analytics.constraints import get_main_constraints
 from modules.analytics.returns_cov import compute_performance_metrics
 from modules.analytics.weight_display import (
@@ -170,6 +170,9 @@ def main():
 
     approach = st.radio("Analysis Approach", ["Manual Single Rolling", "Grid Search", "Bayesian Optimization"], index=0)
 
+    ###################################################################
+    #  A) Manual Single Rolling
+    ###################################################################
     if approach == "Manual Single Rolling":
         rebal_freq = st.selectbox("Rebalance Frequency (months)", [1, 3, 6], index=0)
         lookback_m = st.selectbox("Lookback Window (months)", [3, 6, 12], index=0)
@@ -190,7 +193,6 @@ def main():
 
         if st.button("Run Rolling (Manual)"):
 
-            # param_sharpe_fn => function that returns (weights, summary)
             def param_sharpe_fn(sub_ret: pd.DataFrame):
                 w_opt, summary = parametric_max_sharpe_aclass_subtype(
                     df_returns=sub_ret,
@@ -226,11 +228,11 @@ def main():
                 trade_buffer_pct=trade_buffer_pct
             )
 
-            # # Rebalance Debug Table (commented out if you don't want to show):
+            # Optional: debug table
             # st.write("### Rebalance Debug Table")
             # st.dataframe(df_rebal)
 
-            # 1) Build old vs new lines (absolute or normalized)
+            # old vs new lines
             old_line = build_old_portfolio_line(df_instruments, df_sub)
             idx_all = old_line.index.union(sr_line.index)
             old_line_u = old_line.reindex(idx_all, method="ffill")
@@ -238,27 +240,24 @@ def main():
             old0 = old_line_u.iloc[0]
             new0 = new_line_u.iloc[0]
 
-            # 2) Cumulative line chart
+            # cumulative line chart
             df_cum = pd.DataFrame({
                 "Old(%)": (old_line_u / old0 - 1) * 100,
                 "New(%)": (new_line_u / new0 - 1) * 100
             }, index=idx_all)
             st.line_chart(df_cum)
 
-            # 3) Performance metrics
             perf_old = compute_performance_metrics(old_line_u * old0, daily_rf=daily_rf)
             perf_new = compute_performance_metrics(new_line_u * new0, daily_rf=daily_rf)
             df_perf = pd.DataFrame({"Old": perf_old, "New": perf_new})
             st.write("**Performance**:")
             st.dataframe(df_perf)
 
-            # 4) Weight differences
             display_instrument_weight_diff(df_instruments, col_tickers, final_w)
             display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
-            # 5) Transaction Cost Impact
-            from modules.backtesting.rolling_monthly import compute_cost_impact
-            final_val = sr_line.iloc[-1]  # if sr_line is normalized to 1.0 start => final
+            # Transaction Cost Impact
+            final_val = sr_line.iloc[-1]  # if sr_line starts at 1.0 => final ratio
             cost_stats = compute_cost_impact(df_rebal, final_val)
             st.write("### Transaction Cost Impact")
             df_cost_stats = pd.DataFrame([cost_stats])
@@ -268,7 +267,7 @@ def main():
                 "Avg Cost per Rebalance": "{:.4f}"
             }))
 
-            # 6) Interval bar chart + stats
+            # Interval bar chart + stats
             rebal_dates = df_rebal["Date"].unique().tolist()
             rebal_dates.sort()
             first_day = sr_line.index[0]
@@ -288,14 +287,12 @@ def main():
                 display_mode="grouped"
             )
 
-            # 7) Drawdown chart & table
+            # Drawdown chart
             st.write("### Drawdown Over Time")
             df_compare = pd.DataFrame({
                 "Old_Ptf": old_line_u * old0,
                 "New_Ptf": new_line_u * new0
             }, index=old_line_u.index).dropna()
-
-            from modules.backtesting.max_drawdown import plot_drawdown_series, show_max_drawdown_comparison
             fig_dd = plot_drawdown_series(df_compare)
             st.plotly_chart(fig_dd)
 
@@ -303,7 +300,7 @@ def main():
             st.write("### Max Drawdown Comparison")
             st.dataframe(df_dd_comp.style.format("{:.2%}"))
 
-            # 8) 12-month final frontier
+            # 12-month final frontier
             st.write("### 12-Month Final Frontier")
             fvol, fret = compute_efficient_frontier_12m(
                 df_prices=df_sub,
@@ -339,7 +336,6 @@ def main():
                     r = (mean_12m @ w) * 252
                     return v, r
 
-                # build old w array from df_instruments
                 old_map = {}
                 for i, tk in enumerate(col_tickers):
                     row_ = df_instruments[df_instruments["#ID"] == tk]
@@ -355,7 +351,6 @@ def main():
                 old_vol, old_ret = daily_vol_ret(w_old)
                 new_vol, new_ret = daily_vol_ret(final_w)
 
-                from modules.optimization.efficient_frontier import interpolate_frontier_for_vol, plot_frontier_comparison
                 same_v, same_r = interpolate_frontier_for_vol(fvol, fret, old_vol)
                 if same_v is None:
                     st.warning("Could not interpolate frontier at old vol.")
@@ -369,12 +364,80 @@ def main():
                     )
                     st.plotly_chart(figf)
 
+    ###################################################################
+    #  B) Grid Search
+    ###################################################################
     elif approach == "Grid Search":
         st.subheader("Grid Search (Parallel) => security-type constraints")
-        st.info("See rolling_gridsearch for the full code.")
+
+        # Let user select ranges
+        frontier_points_list = st.multiselect("Frontier Points (n_points)", [5,10,15,20,30], [5,10,15])
+        alpha_list = st.multiselect("Alpha values (for mean)", [0,0.1,0.2,0.3,0.4,0.5], [0,0.1,0.3])
+        beta_list = st.multiselect("Beta values (for cov)", [0,0.1,0.2,0.3,0.4,0.5], [0.1,0.2])
+        rebal_freq_list = st.multiselect("Rebalance Frequency (months)", [1,3,6], [1,3])
+        lookback_list = st.multiselect("Lookback (months)", [3,6,12], [3,6])
+        max_workers = st.number_input("Max Workers", 1, 64, 4, step=1)
+
+        if st.button("Run Grid Search"):
+            if (not frontier_points_list or not alpha_list or not beta_list
+                or not rebal_freq_list or not lookback_list):
+                st.error("Please select at least one value in each parameter.")
+            else:
+                from modules.backtesting.rolling_monthly import rolling_grid_search
+                df_gs = rolling_grid_search(
+                    df_prices=df_sub,
+                    df_instruments=df_instruments,
+                    asset_cls_list=asset_cls_list,
+                    sec_type_list=sec_type_list,
+                    class_sum_constraints=class_sum_constraints,
+                    subtype_constraints=subtype_constraints,
+                    daily_rf=daily_rf,
+                    frontier_points_list=frontier_points_list,
+                    alpha_list=alpha_list,
+                    beta_list=beta_list,
+                    rebal_freq_list=rebal_freq_list,
+                    lookback_list=lookback_list,
+                    transaction_cost_value=transaction_cost_value,
+                    transaction_cost_type=cost_type,
+                    trade_buffer_pct=trade_buffer_pct,
+                    use_michaud=False,
+                    n_boot=10,
+                    do_shrink_means=True,
+                    do_shrink_cov=True,
+                    reg_cov=False,
+                    do_ledoitwolf=False,
+                    do_ewm=False,
+                    ewm_alpha=0.06,
+                    max_workers=max_workers
+                )
+                st.dataframe(df_gs)
+                if "Sharpe Ratio" in df_gs.columns:
+                    best_ = df_gs.sort_values("Sharpe Ratio", ascending=False).head(5)
+                    st.write("**Top 5 combos by Sharpe**:")
+                    st.dataframe(best_)
+
+    ###################################################################
+    #  C) Bayesian Optimization
+    ###################################################################
     else:
         st.subheader("Bayesian => security-type constraints")
-        st.info("See rolling_bayesian for the full code.")
+
+        from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
+        df_bayes = rolling_bayesian_optimization(
+            df_prices=df_sub,
+            df_instruments=df_instruments,
+            asset_cls_list=asset_cls_list,
+            sec_type_list=sec_type_list,
+            class_sum_constraints=class_sum_constraints,
+            subtype_constraints=subtype_constraints,
+            daily_rf=daily_rf,
+            transaction_cost_value=transaction_cost_value,
+            transaction_cost_type=cost_type,
+            trade_buffer_pct=trade_buffer_pct
+        )
+        if not df_bayes.empty:
+            st.write("Bayesian Search Results:")
+            st.dataframe(df_bayes)
 
 if __name__ == "__main__":
     main()
