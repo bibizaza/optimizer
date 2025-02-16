@@ -35,7 +35,7 @@ def rolling_bayesian_optimization(
     st.write("## Bayesian Optimization")
 
     # 1) Number of Bayesian evaluations
-    n_calls = st.number_input("Number of Bayesian evaluations (n_calls)", 5, 100, 20, step=5)
+    n_calls = st.number_input("Number of Bayesian evaluations (n_calls)", 5, 500, 20, step=5)
 
     st.write("### Parameter Ranges")
     # 2) n_points range
