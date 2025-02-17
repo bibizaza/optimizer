@@ -59,6 +59,7 @@ def rolling_bayesian_optimization(
     freq_choices = st.multiselect("Possible Rebal Frequencies (months)", [1,3,6], default=[1,3,6])
     if not freq_choices:
         freq_choices = [1]
+
     # 6) possible lookback windows
     lb_choices = st.multiselect("Possible Lookback Windows (months)", [3,6,12], default=[3,6,12])
     if not lb_choices:
@@ -69,6 +70,7 @@ def rolling_bayesian_optimization(
     ewm_bool_choices = st.multiselect("Use EWM Cov?", [False, True], default=[False, True])
     if not ewm_bool_choices:
         ewm_bool_choices = [False]
+
     # 8) ewm_alpha range
     ewm_alpha_min = st.slider("EWM alpha min", 0.0, 1.0, 0.0, 0.05)
     ewm_alpha_max = st.slider("EWM alpha max", 0.0, 1.0, 1.0, 0.05)
@@ -157,7 +159,7 @@ def rolling_bayesian_optimization(
             "Annual Vol":   result["Annual Vol"]
         })
 
-        # We want to maximize Sharpe => so we minimize negative Sharpe
+        # We want to maximize Sharpe => minimize negative Sharpe
         return -result["Sharpe Ratio"]
 
     # If user doesn't click => do nothing
@@ -165,6 +167,7 @@ def rolling_bayesian_optimization(
         return pd.DataFrame()
 
     from skopt import gp_minimize
+
     with st.spinner("Running Bayesian..."):
         res = gp_minimize(
             objective,
@@ -174,19 +177,22 @@ def rolling_bayesian_optimization(
             callback=[on_step]
         )
 
+    # Build final DataFrame
     df_out = pd.DataFrame(tries_list)
     if not df_out.empty:
+        # Identify best row
         best_idx = df_out["Sharpe Ratio"].idxmax()
-        best_row = df_out.loc[best_idx]
+        best_row = df_out.loc[best_idx].copy()  # copy so we can modify if needed
+
+        # If do_ewm is False => set ewm_alpha=0.0 for logic
+        if best_row["do_ewm"] == False:
+            best_row["ewm_alpha"] = 0.0
+
         st.write("**Best Found**:", dict(best_row))
         st.dataframe(df_out)
 
-        # ---------------------
-        # Download the best row as CSV or JSON
-        # ---------------------
+        # 1) Download as CSV
         import io, json
-
-        # 1) CSV
         best_csv = best_row.to_frame().T.to_csv(index=False)
         st.download_button(
             label="Download Best Param as CSV",
@@ -195,7 +201,7 @@ def rolling_bayesian_optimization(
             mime="text/csv"
         )
 
-        # 2) JSON
+        # 2) Download as JSON
         best_dict = best_row.to_dict()
         best_json = json.dumps(best_dict, indent=2)
         st.download_button(
