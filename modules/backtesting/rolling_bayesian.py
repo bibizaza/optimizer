@@ -30,8 +30,10 @@ def rolling_bayesian_optimization(
     2) Runs scikit-optimize's gp_minimize => calls run_one_combo(...) each iteration.
     3) Shows progress, final best parameters, and DataFrame of tries.
 
-    If user does not click 'Run Bayesian Optimization', returns an empty DataFrame.
+    Returns a DataFrame of all tries. If user doesn't click 'Run Bayesian Optimization',
+    returns an empty DataFrame.
     """
+
     st.write("## Bayesian Optimization")
 
     # 1) Number of Bayesian evaluations
@@ -104,13 +106,13 @@ def rolling_bayesian_optimization(
         x => [n_points, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_]
         """
         combo = tuple(x)  # track raw combo
-        n_points_ = x[0]
-        alpha_ = x[1]    # can be 0 => no mean shrink
-        beta_ = x[2]     # can be 0 => no cov shrink
-        freq_ = x[3]
-        lb_   = x[4]
-        do_ewm_ = x[5]   # bool => use EWM or not
-        ewm_alpha_ = x[6] # if do_ewm_=True, must be >0
+        n_points_   = x[0]
+        alpha_      = x[1]    # can be 0 => no mean shrink
+        beta_       = x[2]    # can be 0 => no cov shrink
+        freq_       = x[3]
+        lb_         = x[4]
+        do_ewm_     = x[5]    # bool => use EWM or not
+        ewm_alpha_  = x[6]    # if do_ewm_=True, must be >0
 
         # If do_ewm_ is True but ewm_alpha_ <= 0 => clamp to 1e-6 so Pandas won't error
         if do_ewm_ and ewm_alpha_ <= 0:
@@ -163,7 +165,6 @@ def rolling_bayesian_optimization(
         return pd.DataFrame()
 
     from skopt import gp_minimize
-
     with st.spinner("Running Bayesian..."):
         res = gp_minimize(
             objective,
@@ -179,5 +180,29 @@ def rolling_bayesian_optimization(
         best_row = df_out.loc[best_idx]
         st.write("**Best Found**:", dict(best_row))
         st.dataframe(df_out)
+
+        # ---------------------
+        # Download the best row as CSV or JSON
+        # ---------------------
+        import io, json
+
+        # 1) CSV
+        best_csv = best_row.to_frame().T.to_csv(index=False)
+        st.download_button(
+            label="Download Best Param as CSV",
+            data=best_csv,
+            file_name="best_bayes_param.csv",
+            mime="text/csv"
+        )
+
+        # 2) JSON
+        best_dict = best_row.to_dict()
+        best_json = json.dumps(best_dict, indent=2)
+        st.download_button(
+            label="Download Best Param as JSON",
+            data=best_json,
+            file_name="best_bayes_param.json",
+            mime="application/json"
+        )
 
     return df_out

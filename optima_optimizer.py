@@ -185,9 +185,9 @@ def main():
 
         st.write("**Mean & Cov Shrink**")
         do_shrink_means = st.checkbox("Shrink Means?", True)
-        alpha_shrink = st.slider("Alpha (for means)", 0.0, 1.0, 0.3, 0.05)
+        alpha_shrink = st.slider("Alpha (for means)", 0.0, 1.0, 0.3, 0.01)
         do_shrink_cov = st.checkbox("Shrink Cov (diagonal)?", True)
-        beta_shrink = st.slider("Beta (for cov)", 0.0, 1.0, 0.2, 0.05)
+        beta_shrink = st.slider("Beta (for cov)", 0.0, 1.0, 0.2, 0.01)
 
         n_points_man = st.number_input("Frontier #points", 5, 100, 15, step=5)
 
