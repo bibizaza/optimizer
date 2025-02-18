@@ -13,7 +13,7 @@ import concurrent.futures
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
-# 1) Our custom modules
+# 1) Custom modules
 from modules.analytics.constraints import get_main_constraints
 from modules.analytics.returns_cov import compute_performance_metrics
 from modules.analytics.weight_display import (
@@ -36,12 +36,12 @@ from modules.optimization.efficient_frontier import (
     plot_frontier_comparison
 )
 
-##############################################################################
-# Helper to parse Excel (unchanged)
-##############################################################################
+###############################################################################
+# 0) Helper: parse Excel
+###############################################################################
 def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_instruments = pd.read_excel(file, sheet_name=streamlit_sheet, header=0)
-    df_prices_raw = pd.read_excel(file, sheet_name=histo_sheet, header=0)
+    df_prices_raw  = pd.read_excel(file, sheet_name=histo_sheet, header=0)
     if df_prices_raw.columns[0] != "Date":
         df_prices_raw.rename(columns={df_prices_raw.columns[0]: "Date"}, inplace=True)
     df_prices_raw["Date"] = pd.to_datetime(df_prices_raw["Date"], errors="coerce")
@@ -51,21 +51,19 @@ def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_prices_raw = df_prices_raw.apply(pd.to_numeric, errors="coerce")
     return df_instruments, df_prices_raw
 
-##############################################################################
-# Move coverage & constraints to the SIDEBAR
-##############################################################################
+###############################################################################
+# 1) SIDEBAR: Data loading + coverage + constraints
+###############################################################################
 def sidebar_data_and_constraints():
     """
     Builds the entire sidebar UI:
-      - approach_data radio
-      - file upload (Excel or Parquet)
-      - coverage slider
+      - Data source approach (radio)
+      - File upload (Excel or Parquet)
+      - Coverage slider
       - get_main_constraints => constraints
-
-    Returns:
-      df_instruments, df_prices, coverage, main_constr
+    Returns: df_instruments, df_prices, coverage, main_constr
     """
-    st.sidebar.title("Data Loading + Constraints")
+    st.sidebar.title("Data Loading")
 
     approach_data = st.sidebar.radio(
         "Data Source Approach",
@@ -73,11 +71,10 @@ def sidebar_data_and_constraints():
         index=1
     )
 
-    # placeholders
     df_instruments = pd.DataFrame()
-    df_prices = pd.DataFrame()
-    coverage  = 0.8
-    main_constr = {}
+    df_prices      = pd.DataFrame()
+    coverage       = 0.8
+    main_constr    = {}
 
     if approach_data == "One-time Convert Excel->Parquet":
         st.sidebar.info("Excel->Parquet converter not shown here.")
@@ -86,36 +83,35 @@ def sidebar_data_and_constraints():
     elif approach_data == "Use Excel for Analysis":
         excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
         if excel_file:
-            # parse Excel
             df_instruments, df_prices = parse_excel(excel_file)
-            if df_prices.empty:
-                st.sidebar.warning("No valid data in Excel.")
-            else:
+            if not df_prices.empty:
                 coverage = st.sidebar.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
                 st.sidebar.markdown("---")
                 st.sidebar.subheader("Constraints & Costs")
                 main_constr = get_main_constraints(df_instruments, df_prices)
+            else:
+                st.sidebar.warning("No valid data in Excel.")
     else:
         # "Use Parquet for Analysis"
         st.sidebar.info("Upload instruments.parquet & prices.parquet")
         fi = st.sidebar.file_uploader("Upload instruments.parquet", type=["parquet"])
-        fp = st.sidebar.file_uploader("Upload prices.parquet",     type=["parquet"])
+        fp = st.sidebar.file_uploader("Upload prices.parquet", type=["parquet"])
         if fi and fp:
             df_instruments = pd.read_parquet(fi)
             df_prices      = pd.read_parquet(fp)
-            if df_prices.empty:
-                st.sidebar.warning("No valid data in Parquet.")
-            else:
-                coverage = st.sidebar.slider("Min coverage fraction", 0.0,1.0,0.8,0.05)
+            if not df_prices.empty:
+                coverage = st.sidebar.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
                 st.sidebar.markdown("---")
                 st.sidebar.subheader("Constraints & Costs")
                 main_constr = get_main_constraints(df_instruments, df_prices)
+            else:
+                st.sidebar.warning("No valid data in Parquet files.")
 
     return df_instruments, df_prices, coverage, main_constr
 
-##############################################################################
-# Clean & old_portfolio
-##############################################################################
+###############################################################################
+# 2) Clean & Build Old Portfolio
+###############################################################################
 def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     df_prices = df_prices.copy()
     coverage = df_prices.notna().sum(axis=1)
@@ -143,26 +139,27 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
     sr.name = "Old_Ptf"
     return sr
 
-##############################################################################
+###############################################################################
 # Main Streamlit App
-##############################################################################
+###############################################################################
 def main():
     st.title("Optima Rolling Backtest + Frontier + Drawdown + Cost Impact")
 
-    # 1) Load data + coverage + constraints from the sidebar
+    # 1) Sidebar: data + coverage + constraints
     df_instruments, df_prices, coverage, main_constr = sidebar_data_and_constraints()
     if df_instruments.empty or df_prices.empty or not main_constr:
         st.stop()
 
-    user_start             = main_constr["user_start"]
-    constraint_mode        = main_constr["constraint_mode"]
-    buffer_pct             = main_constr["buffer_pct"]
-    class_sum_constraints  = main_constr["class_sum_constraints"]
-    subtype_constraints    = main_constr["subtype_constraints"]
-    daily_rf               = main_constr["daily_rf"]
-    cost_type              = main_constr["cost_type"]
-    transaction_cost_value = main_constr["transaction_cost_value"]
-    trade_buffer_pct       = main_constr["trade_buffer_pct"]
+    # Extract constraints from main_constr
+    user_start            = main_constr["user_start"]
+    constraint_mode       = main_constr["constraint_mode"]
+    buffer_pct            = main_constr["buffer_pct"]
+    class_sum_constraints = main_constr["class_sum_constraints"]
+    subtype_constraints   = main_constr["subtype_constraints"]
+    daily_rf              = main_constr["daily_rf"]
+    cost_type             = main_constr["cost_type"]
+    transaction_cost_value= main_constr["transaction_cost_value"]
+    trade_buffer_pct      = main_constr["trade_buffer_pct"]
 
     # 2) Clean data
     df_prices_clean = clean_df_prices(df_prices, coverage)
@@ -210,32 +207,36 @@ def main():
             asset_cls_list.append("Unknown")
             sec_type_list.append("Unknown")
 
-    # 5) Analysis Approach
+    # 5) Radio => Analysis Approach
     approach = st.radio("Analysis Approach", ["Manual Single Rolling", "Grid Search", "Bayesian Optimization"], index=0)
 
     ###################################################################
-    #  A) Manual Single Rolling
+    # A) Manual Single Rolling
     ###################################################################
     if approach == "Manual Single Rolling":
-        rebal_freq = st.selectbox("Rebalance Frequency (months)", [1, 3, 6], index=0)
-        lookback_m = st.selectbox("Lookback Window (months)", [3, 6, 12], index=0)
-        window_days = lookback_m * 21
 
-        reg_cov = st.checkbox("Regularize Cov?", False)
-        do_ledoitwolf = st.checkbox("Use LedoitWolf Cov?", False)
-        do_ewm = st.checkbox("Use EWM Cov?", False)
-        ewm_alpha = st.slider("EWM alpha", 0.0, 1.0, 0.06, 0.01)
+        # Put all param inputs and the "Run Rolling" button inside an expander
+        with st.expander("Manual Rolling Parameters", expanded=False):
+            rebal_freq = st.selectbox("Rebalance Frequency (months)", [1, 3, 6], index=0)
+            lookback_m = st.selectbox("Lookback Window (months)", [3, 6, 12], index=0)
+            window_days = lookback_m * 21
 
-        st.write("**Mean & Cov Shrink**")
-        do_shrink_means = st.checkbox("Shrink Means?", True)
-        alpha_shrink = st.slider("Alpha (for means)", 0.0, 1.0, 0.3, 0.01)
-        do_shrink_cov = st.checkbox("Shrink Cov (diagonal)?", True)
-        beta_shrink = st.slider("Beta (for cov)", 0.0, 1.0, 0.2, 0.01)
+            reg_cov = st.checkbox("Regularize Cov?", False)
+            do_ledoitwolf = st.checkbox("Use LedoitWolf Cov?", False)
+            do_ewm = st.checkbox("Use EWM Cov?", False)
+            ewm_alpha = st.slider("EWM alpha", 0.0, 1.0, 0.06, 0.01)
 
-        n_points_man = st.number_input("Frontier #points", 5, 100, 15, step=5)
+            st.write("**Mean & Cov Shrink**")
+            do_shrink_means = st.checkbox("Shrink Means?", True)
+            alpha_shrink = st.slider("Alpha (for means)", 0.0, 1.0, 0.3, 0.01)
+            do_shrink_cov = st.checkbox("Shrink Cov (diagonal)?", True)
+            beta_shrink = st.slider("Beta (for cov)", 0.0, 1.0, 0.2, 0.01)
 
-        if st.button("Run Rolling (Manual)"):
+            n_points_man = st.number_input("Frontier #points", 5, 100, 15, step=5)
 
+            run_man_rolling = st.button("Run Rolling (Manual)")
+
+        if run_man_rolling:
             def param_sharpe_fn(sub_ret: pd.DataFrame):
                 w_opt, summary = parametric_max_sharpe_aclass_subtype(
                     df_returns=sub_ret,
@@ -403,6 +404,7 @@ def main():
     elif approach == "Grid Search":
         st.subheader("Grid Search (Parallel) => security-type constraints")
 
+        # Let user select ranges
         frontier_points_list = st.multiselect("Frontier Points (n_points)", [5,10,15,20,30], [5,10,15])
         alpha_list = st.multiselect("Alpha values (for mean)", [0,0.1,0.2,0.3,0.4,0.5], [0,0.1,0.3])
         beta_list = st.multiselect("Beta values (for cov)", [0,0.1,0.2,0.3,0.4,0.5], [0.1,0.2])
@@ -455,11 +457,10 @@ def main():
         st.subheader("Bayesian => security-type constraints")
 
         from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
-        # same call as before => asset_cls_list=..., sec_type_list=...
         df_bayes = rolling_bayesian_optimization(
             df_prices=df_sub,
             df_instruments=df_instruments,
-            asset_cls_list=asset_cls_list,        # same param name
+            asset_cls_list=asset_cls_list,
             sec_type_list=sec_type_list,
             class_sum_constraints=class_sum_constraints,
             subtype_constraints=subtype_constraints,
