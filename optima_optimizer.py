@@ -36,9 +36,9 @@ from modules.optimization.efficient_frontier import (
     plot_frontier_comparison
 )
 
-######################################################################
-# Excel / Parquet Loader
-######################################################################
+##############################################################################
+# Helper to parse Excel (unchanged)
+##############################################################################
 def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_instruments = pd.read_excel(file, sheet_name=streamlit_sheet, header=0)
     df_prices_raw = pd.read_excel(file, sheet_name=histo_sheet, header=0)
@@ -51,6 +51,71 @@ def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_prices_raw = df_prices_raw.apply(pd.to_numeric, errors="coerce")
     return df_instruments, df_prices_raw
 
+##############################################################################
+# Move coverage & constraints to the SIDEBAR
+##############################################################################
+def sidebar_data_and_constraints():
+    """
+    Builds the entire sidebar UI:
+      - approach_data radio
+      - file upload (Excel or Parquet)
+      - coverage slider
+      - get_main_constraints => constraints
+
+    Returns:
+      df_instruments, df_prices, coverage, main_constr
+    """
+    st.sidebar.title("Data Loading + Constraints")
+
+    approach_data = st.sidebar.radio(
+        "Data Source Approach",
+        ["One-time Convert Excel->Parquet", "Use Excel for Analysis", "Use Parquet for Analysis"],
+        index=1
+    )
+
+    # placeholders
+    df_instruments = pd.DataFrame()
+    df_prices = pd.DataFrame()
+    coverage  = 0.8
+    main_constr = {}
+
+    if approach_data == "One-time Convert Excel->Parquet":
+        st.sidebar.info("Excel->Parquet converter not shown here.")
+        return df_instruments, df_prices, coverage, main_constr
+
+    elif approach_data == "Use Excel for Analysis":
+        excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
+        if excel_file:
+            # parse Excel
+            df_instruments, df_prices = parse_excel(excel_file)
+            if df_prices.empty:
+                st.sidebar.warning("No valid data in Excel.")
+            else:
+                coverage = st.sidebar.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
+                st.sidebar.markdown("---")
+                st.sidebar.subheader("Constraints & Costs")
+                main_constr = get_main_constraints(df_instruments, df_prices)
+    else:
+        # "Use Parquet for Analysis"
+        st.sidebar.info("Upload instruments.parquet & prices.parquet")
+        fi = st.sidebar.file_uploader("Upload instruments.parquet", type=["parquet"])
+        fp = st.sidebar.file_uploader("Upload prices.parquet",     type=["parquet"])
+        if fi and fp:
+            df_instruments = pd.read_parquet(fi)
+            df_prices      = pd.read_parquet(fp)
+            if df_prices.empty:
+                st.sidebar.warning("No valid data in Parquet.")
+            else:
+                coverage = st.sidebar.slider("Min coverage fraction", 0.0,1.0,0.8,0.05)
+                st.sidebar.markdown("---")
+                st.sidebar.subheader("Constraints & Costs")
+                main_constr = get_main_constraints(df_instruments, df_prices)
+
+    return df_instruments, df_prices, coverage, main_constr
+
+##############################################################################
+# Clean & old_portfolio
+##############################################################################
 def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     df_prices = df_prices.copy()
     coverage = df_prices.notna().sum(axis=1)
@@ -61,10 +126,6 @@ def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     return df_prices
 
 def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> pd.Series:
-    """
-    Creates a daily time series for the old portfolio's performance,
-    normalizing to 1.0 at the first date.
-    """
     df_prices = df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
     ticker_qty = {}
     for _, row in df_instruments.iterrows():
@@ -82,49 +143,30 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
     sr.name = "Old_Ptf"
     return sr
 
-######################################################################
+##############################################################################
 # Main Streamlit App
-######################################################################
+##############################################################################
 def main():
     st.title("Optima Rolling Backtest + Frontier + Drawdown + Cost Impact")
 
-    # 1) Data Source
-    approach_data = st.radio("Data Source Approach",
-        ["One-time Convert Excel->Parquet", "Use Excel for Analysis", "Use Parquet for Analysis"]
-    )
-    if approach_data == "One-time Convert Excel->Parquet":
-        st.info("Excel->Parquet converter not shown here.")
+    # 1) Load data + coverage + constraints from the sidebar
+    df_instruments, df_prices, coverage, main_constr = sidebar_data_and_constraints()
+    if df_instruments.empty or df_prices.empty or not main_constr:
         st.stop()
 
-    if approach_data == "Use Excel for Analysis":
-        excel_file = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
-        if not excel_file:
-            st.stop()
-        df_instruments, df_prices = parse_excel(excel_file)
-    else:
-        st.info("Upload instruments.parquet & prices.parquet")
-        fi = st.file_uploader("Upload instruments.parquet", type=["parquet"])
-        fp = st.file_uploader("Upload prices.parquet", type=["parquet"])
-        if not fi or not fp:
-            st.stop()
-        df_instruments = pd.read_parquet(fi)
-        df_prices = pd.read_parquet(fp)
+    user_start             = main_constr["user_start"]
+    constraint_mode        = main_constr["constraint_mode"]
+    buffer_pct             = main_constr["buffer_pct"]
+    class_sum_constraints  = main_constr["class_sum_constraints"]
+    subtype_constraints    = main_constr["subtype_constraints"]
+    daily_rf               = main_constr["daily_rf"]
+    cost_type              = main_constr["cost_type"]
+    transaction_cost_value = main_constr["transaction_cost_value"]
+    trade_buffer_pct       = main_constr["trade_buffer_pct"]
 
-    # 2) Clean & constraints
-    coverage = st.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
+    # 2) Clean data
     df_prices_clean = clean_df_prices(df_prices, coverage)
     st.write(f"**Clean data**: {len(df_prices_clean)} rows from {df_prices_clean.index.min()} to {df_prices_clean.index.max()}")
-
-    main_constr = get_main_constraints(df_instruments, df_prices_clean)
-    user_start = main_constr["user_start"]
-    constraint_mode = main_constr["constraint_mode"]
-    buffer_pct = main_constr["buffer_pct"]
-    class_sum_constraints = main_constr["class_sum_constraints"]
-    subtype_constraints = main_constr["subtype_constraints"]
-    daily_rf = main_constr["daily_rf"]
-    cost_type = main_constr["cost_type"]
-    transaction_cost_value = main_constr["transaction_cost_value"]
-    trade_buffer_pct = main_constr["trade_buffer_pct"]
 
     # 3) Build old portfolio weights
     df_instruments["Value"] = df_instruments["#Quantity"] * df_instruments["#Last_Price"]
@@ -168,6 +210,7 @@ def main():
             asset_cls_list.append("Unknown")
             sec_type_list.append("Unknown")
 
+    # 5) Analysis Approach
     approach = st.radio("Analysis Approach", ["Manual Single Rolling", "Grid Search", "Bayesian Optimization"], index=0)
 
     ###################################################################
@@ -228,11 +271,6 @@ def main():
                 trade_buffer_pct=trade_buffer_pct
             )
 
-            # Optional: debug table
-            # st.write("### Rebalance Debug Table")
-            # st.dataframe(df_rebal)
-
-            # old vs new lines
             old_line = build_old_portfolio_line(df_instruments, df_sub)
             idx_all = old_line.index.union(sr_line.index)
             old_line_u = old_line.reindex(idx_all, method="ffill")
@@ -240,7 +278,6 @@ def main():
             old0 = old_line_u.iloc[0]
             new0 = new_line_u.iloc[0]
 
-            # cumulative line chart
             df_cum = pd.DataFrame({
                 "Old(%)": (old_line_u / old0 - 1) * 100,
                 "New(%)": (new_line_u / new0 - 1) * 100
@@ -256,8 +293,7 @@ def main():
             display_instrument_weight_diff(df_instruments, col_tickers, final_w)
             display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
-            # Transaction Cost Impact
-            final_val = sr_line.iloc[-1]  # if sr_line starts at 1.0 => final ratio
+            final_val = sr_line.iloc[-1]
             cost_stats = compute_cost_impact(df_rebal, final_val)
             st.write("### Transaction Cost Impact")
             df_cost_stats = pd.DataFrame([cost_stats])
@@ -267,7 +303,6 @@ def main():
                 "Avg Cost per Rebalance": "{:.4f}"
             }))
 
-            # Interval bar chart + stats
             rebal_dates = df_rebal["Date"].unique().tolist()
             rebal_dates.sort()
             first_day = sr_line.index[0]
@@ -287,7 +322,6 @@ def main():
                 display_mode="grouped"
             )
 
-            # Drawdown chart
             st.write("### Drawdown Over Time")
             df_compare = pd.DataFrame({
                 "Old_Ptf": old_line_u * old0,
@@ -300,7 +334,6 @@ def main():
             st.write("### Max Drawdown Comparison")
             st.dataframe(df_dd_comp.style.format("{:.2%}"))
 
-            # 12-month final frontier
             st.write("### 12-Month Final Frontier")
             fvol, fret = compute_efficient_frontier_12m(
                 df_prices=df_sub,
@@ -370,7 +403,6 @@ def main():
     elif approach == "Grid Search":
         st.subheader("Grid Search (Parallel) => security-type constraints")
 
-        # Let user select ranges
         frontier_points_list = st.multiselect("Frontier Points (n_points)", [5,10,15,20,30], [5,10,15])
         alpha_list = st.multiselect("Alpha values (for mean)", [0,0.1,0.2,0.3,0.4,0.5], [0,0.1,0.3])
         beta_list = st.multiselect("Beta values (for cov)", [0,0.1,0.2,0.3,0.4,0.5], [0.1,0.2])
@@ -423,10 +455,11 @@ def main():
         st.subheader("Bayesian => security-type constraints")
 
         from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
+        # same call as before => asset_cls_list=..., sec_type_list=...
         df_bayes = rolling_bayesian_optimization(
             df_prices=df_sub,
             df_instruments=df_instruments,
-            asset_cls_list=asset_cls_list,
+            asset_cls_list=asset_cls_list,        # same param name
             sec_type_list=sec_type_list,
             class_sum_constraints=class_sum_constraints,
             subtype_constraints=subtype_constraints,
