@@ -21,19 +21,28 @@ from modules.analytics.weight_display import (
 )
 from modules.backtesting.rolling_monthly import (
     rolling_backtest_monthly_param_sharpe,
-    compute_cost_impact
+    compute_cost_impact,
+    # for grid search
+    rolling_grid_search
 )
 from modules.backtesting.rolling_intervals import display_interval_bars_and_stats
 from modules.backtesting.max_drawdown import (
     plot_drawdown_series,
     show_max_drawdown_comparison
 )
+# your extended metrics code is presumably in modules.analytics.extended_metrics
+from modules.analytics.extended_metrics import compute_extended_metrics
+# the standard param solver
 from modules.optimization.cvxpy_optimizer import parametric_max_sharpe_aclass_subtype
+# the efficient frontier for the final comparison
 from modules.optimization.efficient_frontier import (
     compute_efficient_frontier_12m,
     interpolate_frontier_for_vol,
     plot_frontier_comparison
 )
+# the Bayesian logic:
+from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
+
 
 ###########################################################
 # parse_excel helper
@@ -249,6 +258,7 @@ def main():
                 )
                 return w_opt, summary
 
+            # rolling_backtest_monthly_param_sharpe => returns 6 items here
             sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
                 rolling_backtest_monthly_param_sharpe(
                     df_prices=df_sub,
@@ -304,11 +314,9 @@ def main():
             df_risk_table = build_metric_df(risk_keys, ext_metrics_old, ext_metrics_new)
             df_ratio_table= build_metric_df(ratio_keys, ext_metrics_old, ext_metrics_new)
 
-            # 3) Format columns => Return, Vol, MaxDD, VaR, CVaR => % w/1 decimal
-            #    TimeToRecovery => int, else => 2 decimals
+            # 3) Format columns => Return, Vol, MaxDD => % w/1 decimal
             def format_extended_tables(df_):
                 def format_value(metric_name, val):
-                    # which metrics are perc with 1 decimal
                     perc_metrics = ["Total Return","Annual Return","Annual Vol",
                                     "MaxDD","VaR_1M99","CVaR_1M99"]
                     if metric_name in perc_metrics:
@@ -316,7 +324,6 @@ def main():
                     elif metric_name=="TimeToRecovery":
                         return f"{val:.0f}"
                     else:
-                        # default => 2 decimals
                         return f"{val:.2f}"
                 df_formatted = df_.copy()
                 for row_m in df_formatted.index:
@@ -385,7 +392,7 @@ def main():
             st.write("### Max Drawdown Comparison")
             st.dataframe(df_dd_comp.style.format("{:.2%}"))
 
-            # 8) Final frontier
+            # 8) Final 12-month frontier
             st.write("### 12-Month Final Frontier")
             fvol, fret = compute_efficient_frontier_12m(
                 df_prices=df_sub,
@@ -428,7 +435,7 @@ def main():
                         old_map[i]= row_["Weight_Old"].iloc[0]
                     else:
                         old_map[i]=0.0
-                sum_old = np.sum(list(old_map.values()))
+                sum_old= np.sum(list(old_map.values()))
                 if sum_old<=0:
                     sum_old=1.0
                 w_old= np.array([old_map[i] for i in range(len(col_tickers))])/ sum_old
@@ -452,15 +459,74 @@ def main():
     # B) Grid Search
     ###########################################################
     elif approach == "Grid Search":
-        st.subheader("Grid Search (Parallel) => extended metrics can be integrated if desired.")
-        # Omitted for brevity or you can adapt your existing logic
+        st.subheader("Grid Search (Parallel) => extended metrics not displayed by default.")
+        # typical UI
+        frontier_points_list = st.multiselect("Frontier Points (n_points)", [5,10,15,20,30], [5,10,15])
+        alpha_list = st.multiselect("Alpha values (for mean)", [0,0.1,0.2,0.3,0.4,0.5], [0,0.1,0.3])
+        beta_list  = st.multiselect("Beta values (for cov)",  [0,0.1,0.2,0.3,0.4,0.5], [0.1,0.2])
+        rebal_freq_list = st.multiselect("Rebalance freq (months)", [1,3,6],[1,3])
+        lookback_list   = st.multiselect("Lookback (months)", [3,6,12],[3,6])
+        max_workers     = st.number_input("Max Workers",1,64,4,step=1)
+
+        if st.button("Run Grid Search"):
+            if (not frontier_points_list or not alpha_list or not beta_list
+                or not rebal_freq_list or not lookback_list):
+                st.error("Please select at least one param in each list.")
+            else:
+                # we import rolling_grid_search from rolling_monthly or a separate file
+                df_gs = rolling_grid_search(
+                    df_prices=df_sub,
+                    df_instruments=df_instruments,
+                    asset_cls_list=asset_cls_list,
+                    sec_type_list=sec_type_list,
+                    class_sum_constraints=class_sum_constraints,
+                    subtype_constraints=subtype_constraints,
+                    daily_rf=daily_rf,
+                    frontier_points_list=frontier_points_list,
+                    alpha_list=alpha_list,
+                    beta_list=beta_list,
+                    rebal_freq_list=rebal_freq_list,
+                    lookback_list=lookback_list,
+                    transaction_cost_value=transaction_cost_value,
+                    transaction_cost_type=cost_type,
+                    trade_buffer_pct=trade_buffer_pct,
+                    use_michaud=False,
+                    n_boot=10,
+                    do_shrink_means=True,
+                    do_shrink_cov=True,
+                    reg_cov=False,
+                    do_ledoitwolf=False,
+                    do_ewm=False,
+                    ewm_alpha=0.06,
+                    max_workers=max_workers
+                )
+                st.dataframe(df_gs)
+                if "Sharpe Ratio" in df_gs.columns:
+                    best_ = df_gs.sort_values("Sharpe Ratio", ascending=False).head(5)
+                    st.write("**Top 5 combos by Sharpe**")
+                    st.dataframe(best_)
 
     ###########################################################
     # C) Bayesian
     ###########################################################
     else:
         st.subheader("Bayesian => security-type constraints")
-        # Omitted for brevity or you can adapt your existing logic
+        # typical UI
+        df_bayes = rolling_bayesian_optimization(
+            df_prices=df_sub,
+            df_instruments=df_instruments,
+            asset_cls_list=asset_cls_list,
+            sec_type_list=sec_type_list,
+            class_sum_constraints=class_sum_constraints,
+            subtype_constraints=subtype_constraints,
+            daily_rf=daily_rf,
+            transaction_cost_value=transaction_cost_value,
+            transaction_cost_type=cost_type,
+            trade_buffer_pct=trade_buffer_pct
+        )
+        if not df_bayes.empty:
+            st.write("Bayesian Search Results:")
+            st.dataframe(df_bayes)
 
 if __name__ == "__main__":
     main()
