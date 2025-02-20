@@ -10,6 +10,7 @@ import traceback
 from dateutil.relativedelta import relativedelta
 import concurrent.futures
 
+# scikit-optimize
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
@@ -19,30 +20,26 @@ from modules.analytics.weight_display import (
     display_instrument_weight_diff,
     display_class_weight_diff
 )
+from modules.analytics.extended_metrics import compute_extended_metrics  # for extended stats
+
 from modules.backtesting.rolling_monthly import (
     rolling_backtest_monthly_param_sharpe,
     compute_cost_impact,
-    # for grid search
-    rolling_grid_search
+    rolling_grid_search  # for Grid Search
 )
 from modules.backtesting.rolling_intervals import display_interval_bars_and_stats
 from modules.backtesting.max_drawdown import (
     plot_drawdown_series,
     show_max_drawdown_comparison
 )
-# your extended metrics code is presumably in modules.analytics.extended_metrics
-from modules.analytics.extended_metrics import compute_extended_metrics
-# the standard param solver
+from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization  # for Bayesian
+
 from modules.optimization.cvxpy_optimizer import parametric_max_sharpe_aclass_subtype
-# the efficient frontier for the final comparison
 from modules.optimization.efficient_frontier import (
     compute_efficient_frontier_12m,
     interpolate_frontier_for_vol,
     plot_frontier_comparison
 )
-# the Bayesian logic:
-from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
-
 
 ###########################################################
 # parse_excel helper
@@ -58,6 +55,7 @@ def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_prices_raw.sort_index(inplace=True)
     df_prices_raw = df_prices_raw.apply(pd.to_numeric, errors="coerce")
     return df_instruments, df_prices_raw
+
 
 ###########################################################
 # sidebar_data_and_constraints
@@ -107,6 +105,7 @@ def sidebar_data_and_constraints():
 
     return df_instruments, df_prices, coverage, main_constr
 
+
 ###########################################################
 # clean_df_prices & build_old_portfolio_line
 ###########################################################
@@ -118,6 +117,7 @@ def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     df_prices = df_prices[coverage >= threshold]
     df_prices = df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
     return df_prices
+
 
 def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> pd.Series:
     df_prices = df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
@@ -136,6 +136,7 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
         sr = sr / sr.iloc[0]
     sr.name = "Old_Ptf"
     return sr
+
 
 ###########################################################
 # main app
@@ -211,6 +212,7 @@ def main():
                         ["Manual Single Rolling", "Grid Search", "Bayesian Optimization"],
                         index=0)
 
+
     ###########################################################
     # A) Manual Single Rolling
     ###########################################################
@@ -237,6 +239,7 @@ def main():
 
         if run_button:
             def param_sharpe_fn(sub_ret: pd.DataFrame):
+                # param solver
                 w_opt, summary = parametric_max_sharpe_aclass_subtype(
                     df_returns=sub_ret,
                     tickers=col_tickers,
@@ -258,21 +261,19 @@ def main():
                 )
                 return w_opt, summary
 
-            # rolling_backtest_monthly_param_sharpe => returns 6 items here
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
-                rolling_backtest_monthly_param_sharpe(
-                    df_prices=df_sub,
-                    df_instruments=df_instruments,
-                    param_sharpe_fn=param_sharpe_fn,
-                    start_date=df_sub.index[0],
-                    end_date=df_sub.index[-1],
-                    months_interval=rebal_freq,
-                    window_days=window_days,
-                    transaction_cost_value=transaction_cost_value,
-                    transaction_cost_type=cost_type,
-                    trade_buffer_pct=trade_buffer_pct,
-                    daily_rf=daily_rf
-                )
+            # Here, we expect 6 items:
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = rolling_backtest_monthly_param_sharpe(
+                df_prices=df_sub,
+                df_instruments=df_instruments,
+                param_sharpe_fn=param_sharpe_fn,
+                start_date=df_sub.index[0],
+                end_date=df_sub.index[-1],
+                months_interval=rebal_freq,
+                window_days=window_days,
+                transaction_cost_value=transaction_cost_value,
+                transaction_cost_type=cost_type,
+                trade_buffer_pct=trade_buffer_pct,
+                daily_rf=daily_rf
             )
 
             # Build old vs new line chart
@@ -283,23 +284,21 @@ def main():
             old0 = old_line_u.iloc[0]
             new0 = new_line_u.iloc[0]
 
-            # 1) Chart
             df_cum = pd.DataFrame({
                 "Old(%)": (old_line_u/old0 -1)*100,
                 "New(%)": (new_line_u/new0 -1)*100
             }, index=idx_all)
             st.line_chart(df_cum)
 
-            # 2) Extended metrics for both old & new
+            # Extended metrics for both old & new
             from modules.analytics.extended_metrics import compute_extended_metrics
             ext_metrics_old = compute_extended_metrics(old_line_u, daily_rf=daily_rf)
 
-            # We'll define which metric keys go into each table:
+            # build small sub-dfs
             performance_keys = ["Total Return", "Annual Return", "Annual Vol", "Sharpe"]
-            risk_keys = ["MaxDD", "TimeToRecovery", "VaR_1M99", "CVaR_1M99"]
-            ratio_keys = ["Skew", "Kurtosis", "Sortino", "Calmar", "Omega"]
+            risk_keys        = ["MaxDD", "TimeToRecovery", "VaR_1M99", "CVaR_1M99"]
+            ratio_keys       = ["Skew", "Kurtosis", "Sortino", "Calmar", "Omega"]
 
-            # Build each sub-table
             def build_metric_df(metric_keys, old_metrics, new_metrics):
                 rows = []
                 for mk in metric_keys:
@@ -311,14 +310,12 @@ def main():
                 return df_out
 
             df_perf_table = build_metric_df(performance_keys, ext_metrics_old, ext_metrics_new)
-            df_risk_table = build_metric_df(risk_keys, ext_metrics_old, ext_metrics_new)
-            df_ratio_table= build_metric_df(ratio_keys, ext_metrics_old, ext_metrics_new)
+            df_risk_table = build_metric_df(risk_keys,        ext_metrics_old, ext_metrics_new)
+            df_ratio_table= build_metric_df(ratio_keys,       ext_metrics_old, ext_metrics_new)
 
-            # 3) Format columns => Return, Vol, MaxDD => % w/1 decimal
             def format_extended_tables(df_):
                 def format_value(metric_name, val):
-                    perc_metrics = ["Total Return","Annual Return","Annual Vol",
-                                    "MaxDD","VaR_1M99","CVaR_1M99"]
+                    perc_metrics = ["Total Return","Annual Return","Annual Vol","MaxDD","VaR_1M99","CVaR_1M99"]
                     if metric_name in perc_metrics:
                         return f"{val*100:.1f}%"
                     elif metric_name=="TimeToRecovery":
@@ -344,11 +341,11 @@ def main():
             df_ratio_table_fmt = format_extended_tables(df_ratio_table)
             st.dataframe(df_ratio_table_fmt)
 
-            # 4) Display weight diffs
+            # weight diffs
             display_instrument_weight_diff(df_instruments, col_tickers, final_w)
             display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
-            # 5) Transaction cost
+            # cost
             final_val = sr_line.iloc[-1]
             cost_stats = compute_cost_impact(df_rebal, final_val)
             st.write("### Transaction Cost Impact")
@@ -359,7 +356,7 @@ def main():
                 "Avg Cost per Rebalance": "{:.4f}"
             }))
 
-            # 6) Interval performance
+            # intervals
             rebal_dates = df_rebal["Date"].unique().tolist()
             rebal_dates.sort()
             first_day = sr_line.index[0]
@@ -370,6 +367,7 @@ def main():
                 rebal_dates.append(last_day)
 
             st.write("### Interval Performance")
+            from modules.backtesting.rolling_intervals import display_interval_bars_and_stats
             display_interval_bars_and_stats(
                 sr_line_old=old_line_u,
                 sr_line_new=sr_line,
@@ -379,21 +377,23 @@ def main():
                 display_mode="grouped"
             )
 
-            # 7) Drawdown
+            # drawdown
             df_compare = pd.DataFrame({
                 "Old_Ptf": old_line_u*old0,
                 "New_Ptf": new_line_u*new0
             }, index=old_line_u.index).dropna()
             st.write("### Drawdown Over Time")
+            from modules.backtesting.max_drawdown import plot_drawdown_series, show_max_drawdown_comparison
             fig_dd= plot_drawdown_series(df_compare)
             st.plotly_chart(fig_dd)
-
             df_dd_comp = show_max_drawdown_comparison(df_compare)
             st.write("### Max Drawdown Comparison")
             st.dataframe(df_dd_comp.style.format("{:.2%}"))
 
-            # 8) Final 12-month frontier
+            # 12-month final frontier
             st.write("### 12-Month Final Frontier")
+            from modules.optimization.efficient_frontier import compute_efficient_frontier_12m, interpolate_frontier_for_vol, plot_frontier_comparison
+
             fvol, fret = compute_efficient_frontier_12m(
                 df_prices=df_sub,
                 df_instruments=df_instruments,
@@ -415,6 +415,7 @@ def main():
             if len(fvol)==0:
                 st.warning("No feasible 12-month frontier.")
             else:
+                # quick recalc daily_vol_ret on last ~252
                 if len(df_sub)> 252:
                     df_12m = df_sub.iloc[-252:].copy()
                 else:
@@ -428,6 +429,7 @@ def main():
                     re_  = (mean_12m @ w)* 252
                     return vol_, re_
 
+                # old vs new
                 old_map={}
                 for i, tk in enumerate(col_tickers):
                     row_= df_instruments[df_instruments["#ID"]== tk]
@@ -442,6 +444,7 @@ def main():
 
                 old_vol, old_ret= daily_vol_ret(w_old)
                 new_vol, new_ret= daily_vol_ret(final_w)
+
                 same_v, same_r= interpolate_frontier_for_vol(fvol, fret, old_vol)
                 if same_v is None:
                     st.warning("Could not interpolate frontier at old vol.")
@@ -455,12 +458,12 @@ def main():
                     )
                     st.plotly_chart(figf)
 
+
     ###########################################################
     # B) Grid Search
     ###########################################################
     elif approach == "Grid Search":
         st.subheader("Grid Search (Parallel) => extended metrics not displayed by default.")
-        # typical UI
         frontier_points_list = st.multiselect("Frontier Points (n_points)", [5,10,15,20,30], [5,10,15])
         alpha_list = st.multiselect("Alpha values (for mean)", [0,0.1,0.2,0.3,0.4,0.5], [0,0.1,0.3])
         beta_list  = st.multiselect("Beta values (for cov)",  [0,0.1,0.2,0.3,0.4,0.5], [0.1,0.2])
@@ -473,7 +476,6 @@ def main():
                 or not rebal_freq_list or not lookback_list):
                 st.error("Please select at least one param in each list.")
             else:
-                # we import rolling_grid_search from rolling_monthly or a separate file
                 df_gs = rolling_grid_search(
                     df_prices=df_sub,
                     df_instruments=df_instruments,
@@ -506,12 +508,13 @@ def main():
                     st.write("**Top 5 combos by Sharpe**")
                     st.dataframe(best_)
 
+
     ###########################################################
     # C) Bayesian
     ###########################################################
     else:
         st.subheader("Bayesian => security-type constraints")
-        # typical UI
+
         df_bayes = rolling_bayesian_optimization(
             df_prices=df_sub,
             df_instruments=df_instruments,
@@ -527,6 +530,7 @@ def main():
         if not df_bayes.empty:
             st.write("Bayesian Search Results:")
             st.dataframe(df_bayes)
+
 
 if __name__ == "__main__":
     main()

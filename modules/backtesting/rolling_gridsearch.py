@@ -1,5 +1,3 @@
-# modules/backtesting/rolling_gridsearch.py
-
 import pandas as pd
 import numpy as np
 from modules.backtesting.rolling_monthly import rolling_backtest_monthly_param_sharpe
@@ -39,7 +37,6 @@ def run_one_combo(
     col_tickers = df_prices.columns.tolist()
 
     def param_sharpe_fn(sub_ret: pd.DataFrame):
-        # If you want to handle Michaud vs standard:
         if use_michaud:
             from modules.optimization.utils.michaud import parametric_max_sharpe_michaud
             w_opt, _ = parametric_max_sharpe_michaud(
@@ -62,7 +59,6 @@ def run_one_combo(
                 n_boot=n_boot
             )
         else:
-            # Standard approach with security-type constraints
             w_opt, _ = parametric_max_sharpe_aclass_subtype(
                 df_returns=sub_ret,
                 tickers=col_tickers,
@@ -87,9 +83,8 @@ def run_one_combo(
     # Convert months to days
     window_days = lb_ * 21
 
-    # NOTE: rolling_backtest_monthly_param_sharpe returns 5 items:
-    # (sr_norm, last_w_final, final_old_w_last, final_rebal_date, df_rebal)
-    sr_line, final_w, _, _, _ = rolling_backtest_monthly_param_sharpe(
+    # Unpack six items from the rolling backtest (discard the extended metrics)
+    sr_line, final_w, _, _, _, _ = rolling_backtest_monthly_param_sharpe(
         df_prices=df_prices,
         df_instruments=df_instruments,
         param_sharpe_fn=param_sharpe_fn,
@@ -102,7 +97,6 @@ def run_one_combo(
         trade_buffer_pct=trade_buffer_pct
     )
 
-    # Now compute performance
     if len(sr_line) > 1:
         perf = compute_performance_metrics(sr_line, daily_rf=daily_rf)
         sr_val = perf["Sharpe Ratio"]
