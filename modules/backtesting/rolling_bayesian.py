@@ -1,3 +1,5 @@
+# File: modules/backtesting/rolling_bayesian.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -38,12 +40,6 @@ def rolling_bayesian_optimization(
     n_calls = st.number_input("Number of Bayesian evaluations (n_calls)", 5, 500, 20, step=5)
 
     st.write("### Parameter Ranges")
-    # n_points range
-    c1, c2 = st.columns(2)
-    with c1:
-        min_npts = st.number_input("Min n_points", 1, 999, 5, step=5)
-    with c2:
-        max_npts = st.number_input("Max n_points", 1, 999, 100, step=5)
 
     # alpha (mean shrink) range
     alpha_min = st.slider("Alpha min (mean shrink)", 0.0, 1.0, 0.0, 0.05)
@@ -72,18 +68,18 @@ def rolling_bayesian_optimization(
     ewm_alpha_min = st.slider("EWM alpha min", 0.0, 1.0, 0.0, 0.05)
     ewm_alpha_max = st.slider("EWM alpha max", 0.0, 1.0, 1.0, 0.05)
 
-    # Store all tries
+    # We'll store all tries in a list
     tries_list = []
 
     # Build parameter space for scikit-optimize
+    # We remove 'n_points' from the space; we only tune alpha, beta, freq, lb, do_ewm, ewm_alpha
     space = [
-        Integer(int(min_npts), int(max_npts), name="n_points"),
-        Real(alpha_min, alpha_max, name="alpha_"),
-        Real(beta_min, beta_max, name="beta_"),
-        Categorical(freq_choices, name="freq_"),
-        Categorical(lb_choices, name="lb_"),
-        Categorical(ewm_bool_choices, name="do_ewm_"),
-        Real(ewm_alpha_min, ewm_alpha_max, name="ewm_alpha_")
+        Real(alpha_min, alpha_max, name="alpha_"),     # mean shrink
+        Real(beta_min,  beta_max,  name="beta_"),      # cov shrink
+        Categorical(freq_choices,  name="freq_"),      # rebal freq
+        Categorical(lb_choices,    name="lb_"),        # lookback
+        Categorical(ewm_bool_choices, name="do_ewm_"), # do_ewm
+        Real(ewm_alpha_min, ewm_alpha_max, name="ewm_alpha_")  # ewm_alpha
     ]
 
     # UI for progress
@@ -100,22 +96,24 @@ def rolling_bayesian_optimization(
 
     def objective(x):
         """
-        x => [n_points, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_]
+        x => [alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_].
+        We'll call run_one_combo(...) to get a Sharpe ratio, then return -Sharpe
+        for minimization.
         """
-        combo = tuple(x)
-        n_points_ = x[0]
-        alpha_ = x[1]
-        beta_ = x[2]
-        freq_ = x[3]
-        lb_ = x[4]
-        do_ewm_ = x[5]
-        ewm_alpha_ = x[6]
+        alpha_ = x[0]
+        beta_ = x[1]
+        freq_ = x[2]
+        lb_   = x[3]
+        do_ewm_     = x[4]
+        ewm_alpha_  = x[5]
 
+        # Ensure ewm_alpha is valid if do_ewm is True
         if do_ewm_ and ewm_alpha_ <= 0:
             ewm_alpha_ = 1e-6
         elif do_ewm_ and ewm_alpha_ > 1:
             ewm_alpha_ = 1.0
 
+        combo = (alpha_, beta_, freq_, lb_)
         result = run_one_combo(
             df_prices=df_prices,
             df_instruments=df_instruments,
@@ -124,7 +122,7 @@ def rolling_bayesian_optimization(
             class_sum_constraints=class_sum_constraints,
             subtype_constraints=subtype_constraints,
             daily_rf=daily_rf,
-            combo=(n_points_, alpha_, beta_, freq_, lb_),
+            combo=combo,   # (alpha_, beta_, freq_, lb_)
             transaction_cost_value=transaction_cost_value,
             transaction_cost_type=transaction_cost_type,
             trade_buffer_pct=trade_buffer_pct,
@@ -138,24 +136,26 @@ def rolling_bayesian_optimization(
             ewm_alpha=ewm_alpha_
         )
 
+        # Append the attempt
         tries_list.append({
-            "n_points": n_points_,
             "alpha": alpha_,
-            "beta": beta_,
+            "beta":  beta_,
             "rebal_freq": freq_,
             "lookback_m": lb_,
             "do_ewm": do_ewm_,
             "ewm_alpha": ewm_alpha_,
             "Sharpe Ratio": result["Sharpe Ratio"],
-            "Annual Ret": result["Annual Ret"],
-            "Annual Vol": result["Annual Vol"]
+            "Annual Ret":   result["Annual Ret"],
+            "Annual Vol":   result["Annual Vol"]
         })
 
+        # We want to maximize Sharpe => minimize negative Sharpe
         return -result["Sharpe Ratio"]
 
     if not st.button("Run Bayesian Optimization"):
         return pd.DataFrame()
 
+    # Actually run the Bayesian optimization
     from skopt import gp_minimize
 
     with st.spinner("Running Bayesian..."):
@@ -167,6 +167,7 @@ def rolling_bayesian_optimization(
             callback=[on_step]
         )
 
+    # Build DataFrame of attempts
     df_out = pd.DataFrame(tries_list)
     if not df_out.empty:
         best_idx = df_out["Sharpe Ratio"].idxmax()

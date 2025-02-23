@@ -5,9 +5,18 @@ import pandas as pd
 
 def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> dict:
     """
-    Now forcibly use st.sidebar.* so the UI is rendered in the sidebar.
+    Retrieve constraints configuration from Streamlit sidebar:
+      - Rebalancing start date
+      - 'constraint_mode' (custom or keep_current)
+      - class-level min/max
+      - subtype-level min/max
+      - daily risk-free rate
+      - transaction cost
+      - trade buffer
+      - etc.
+
+    Returns a dict that can be passed to your optimizer.
     """
-    # Optionally, remove any top-level st.* calls, replace with st.sidebar
     st.sidebar.markdown("### Constraints Configuration")
 
     earliest = df_prices.index.min()
@@ -49,12 +58,12 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
                 with c2:
                     mx_cls = st.number_input(f"Max class sum (%) for {cl}", 0.0, 100.0, 100.0, step=5.0)
                 class_sum_constraints[cl] = {
-                    "min_class_weight": mn_cls/100.0,
-                    "max_class_weight": mx_cls/100.0
+                    "min_class_weight": mn_cls / 100.0,
+                    "max_class_weight": mx_cls / 100.0
                 }
                 # Subtype
                 if have_sec_type:
-                    df_cl = df_instruments[df_instruments["#Asset"]==cl]
+                    df_cl = df_instruments[df_instruments["#Asset"] == cl]
                     st.markdown("**Per-Instrument (Security-Type) Constraints**")
                     stypes = df_cl["#Security_Type"].dropna().unique()
                     for stp in stypes:
@@ -65,17 +74,17 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
                         with cB:
                             max_inst = st.number_input(f"Max inst (%) for {cl}-{stp}", 0.0, 100.0, 10.0, step=1.0)
                         subtype_constraints[(cl, stp)] = {
-                            "min_instrument": min_inst/100.0,
-                            "max_instrument": max_inst/100.0
+                            "min_instrument": min_inst / 100.0,
+                            "max_instrument": max_inst / 100.0
                         }
     else:
         st.sidebar.info("Keep Current: class weights = old +/- buffer. Subtype optional.")
         buff_in = st.sidebar.number_input("Buffer (%) around old class weight", 0.0, 100.0, 5.0, step=1.0)
-        buffer_pct = buff_in/100.0
+        buffer_pct = buff_in / 100.0
         for cl in all_classes:
             with st.sidebar.expander(f"Asset Class: {cl} (keep_current)", expanded=False):
                 if have_sec_type:
-                    df_cl = df_instruments[df_instruments["#Asset"]==cl]
+                    df_cl = df_instruments[df_instruments["#Asset"] == cl]
                     st.markdown("**Security-Type Constraints**")
                     stypes = df_cl["#Security_Type"].dropna().unique()
                     for stp in stypes:
@@ -86,21 +95,21 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
                         with cB:
                             max_inst = st.number_input(f"Max inst (%) for {cl}-{stp}", 0.0, 100.0, 10.0, step=1.0)
                         subtype_constraints[(cl, stp)] = {
-                            "min_instrument": min_inst/100.0,
-                            "max_instrument": max_inst/100.0
+                            "min_instrument": min_inst / 100.0,
+                            "max_instrument": max_inst / 100.0
                         }
 
-    daily_rf = st.sidebar.number_input("Daily RF (%)", 0.0, 100.0, 0.0, 0.5)/100.0
+    daily_rf = st.sidebar.number_input("Daily RF (%)", 0.0, 100.0, 0.0, step=0.5) / 100.0
 
-    cost_type = st.sidebar.selectbox("Transaction Cost Type", ["percentage","ticket_fee"], index=0)
-    if cost_type=="percentage":
-        cost_val = st.sidebar.number_input("Cost (%)", 0.0, 100.0, 1.0, step=0.5)/100.0
+    cost_type = st.sidebar.selectbox("Transaction Cost Type", ["percentage", "ticket_fee"], index=0)
+    if cost_type == "percentage":
+        cost_val = st.sidebar.number_input("Cost (%)", 0.0, 100.0, 1.0, step=0.5) / 100.0
         transaction_cost_value = cost_val
     else:
         transaction_cost_value = st.sidebar.number_input("Ticket Fee", 0.0, 1e9, 10.0, step=10.0)
 
     tb_in = st.sidebar.number_input("Trade Buffer (%)", 0.0, 50.0, 1.0, step=1.0)
-    trade_buffer_pct = tb_in/100.0
+    trade_buffer_pct = tb_in / 100.0
 
     return {
         "user_start": user_start,
