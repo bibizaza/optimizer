@@ -33,24 +33,35 @@ def nearest_pd(mat: np.ndarray, eps_init=1e-12, tries=5)-> np.ndarray:
 def compute_extended_metrics(series_abs: pd.Series, daily_rf: float = 0.0) -> dict:
     freq = 252
     if len(series_abs) < 2:
+        st.write("DEBUG: compute_extended_metrics => Series too short:", len(series_abs))
         return dict.fromkeys([
             "Total Return","Annual Return","Annual Vol","Sharpe","MaxDD","TimeToRecovery",
             "VaR_1M99","CVaR_1M99","Skew","Kurtosis","Sortino","Calmar","Omega"
         ], 0.0)
 
     daily_ret = series_abs.pct_change().dropna()
-    n_days = len(daily_ret)
-    if n_days == 0:
+    st.write("DEBUG compute_extended_metrics => daily_ret shape:", daily_ret.shape)
+    if daily_ret.empty:
+        st.write("DEBUG => daily_ret is empty => no metrics => likely sr_line is constant or NaN.")
         return dict.fromkeys([
             "Total Return","Annual Return","Annual Vol","Sharpe","MaxDD","TimeToRecovery",
             "VaR_1M99","CVaR_1M99","Skew","Kurtosis","Sortino","Calmar","Omega"
         ], 0.0)
 
+    st.write("DEBUG => daily_ret.describe():", daily_ret.describe())
+
+    n_days = len(daily_ret)
     total_ret = series_abs.iloc[-1] / series_abs.iloc[0] - 1
     ann_ret = (1 + total_ret)**(freq / n_days) - 1
     ann_vol = daily_ret.std() * np.sqrt(freq)
     ann_rf = daily_rf * freq
-    sharpe = (ann_ret - ann_rf) / ann_vol if ann_vol > 1e-12 else 0.0
+    st.write(f"DEBUG => dailyRf={daily_rf}, annualRf approx => {ann_rf:.4f}")
+
+    if ann_vol < 1e-12:
+        st.write(f"DEBUG => ann_vol = {ann_vol} < 1e-12 => Sharpe forced to 0.")
+        sharpe = 0.0
+    else:
+        sharpe = (ann_ret - ann_rf) / ann_vol
 
     run_max = series_abs.cummax()
     dd = series_abs / run_max - 1
@@ -128,6 +139,9 @@ def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_prices_raw.set_index("Date", inplace=True)
     df_prices_raw.sort_index(inplace=True)
     df_prices_raw = df_prices_raw.apply(pd.to_numeric, errors="coerce")
+
+    st.write("DEBUG parse_excel => df_instruments shape:", df_instruments.shape)
+    st.write("DEBUG parse_excel => df_prices_raw shape:", df_prices_raw.shape)
     return df_instruments, df_prices_raw
 
 def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
@@ -136,6 +150,7 @@ def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     thresh = df.shape[1] * min_coverage
     df = df[coverage >= thresh]
     df = df.ffill().bfill()
+    st.write("DEBUG clean_df_prices => shape after coverage filter:", df.shape)
     return df
 
 def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> pd.Series:
@@ -147,6 +162,9 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
     sr = pd.Series(vals, index=df.index, name="Old_Ptf")
     if len(sr) > 1 and sr.iloc[0] > 1e-12:
         sr = sr / sr.iloc[0]
+
+    st.write("DEBUG build_old_portfolio_line => shape:", sr.shape)
+    st.write("DEBUG build_old_portfolio_line => head:\n", sr.head(5))
     return sr
 
 #####################################################
@@ -198,15 +216,16 @@ def param_max_sharpe_aclass_subtype(
     if subtype_constraints is None:
         subtype_constraints = {}
 
-    # 1) Clean the returns (remove inf, fill NaN with 0, drop all-NaN col/row)
+    # 1) Clean the returns
     df_ret = df_returns.replace([np.inf, -np.inf], np.nan)
-    df_ret = df_ret.dropna(how='all', axis=1)  # drop columns entirely NaN
-    df_ret = df_ret.dropna(how='all', axis=0)  # drop rows entirely NaN
+    df_ret = df_ret.dropna(how='all', axis=1)
+    df_ret = df_ret.dropna(how='all', axis=0)
     df_ret = df_ret.fillna(0.0)
 
+    st.write("DEBUG param_max_sharpe => df_ret shape:", df_ret.shape)
     n = df_ret.shape[1]
     if n < 1:
-        # Not enough columns to optimize
+        st.write("DEBUG => no columns in df_ret => fallback to empty.")
         return np.array([])
 
     # 2) Build raw mean/cov
@@ -219,7 +238,7 @@ def param_max_sharpe_aclass_subtype(
         try:
             raw_cov = df_cov.xs(last_d, level=0).values
         except KeyError:
-            # If the ewm cov is empty or no data for last_d, fallback
+            st.write("DEBUG => EWM cov is empty => eq weights fallback.")
             return np.ones(n)/n
     else:
         raw_mu = df_ret.mean().values
@@ -234,23 +253,20 @@ def param_max_sharpe_aclass_subtype(
         gm = np.mean(raw_mu)
         raw_mu = (1 - alpha_mean)* raw_mu + alpha_mean* gm
 
-    # 5) nearest_pd + shrink covariance
+    # 5) nearest_pd + shrink
     raw_cov = nearest_pd(raw_cov, 1e-12, 5)
     if do_shrink_cov and beta_cov>1e-12:
         diag_ = np.mean(np.diag(raw_cov))
         raw_cov = (1 - beta_cov)* raw_cov + beta_cov* diag_* np.eye(n)
 
-    # Final check => if not finite, fallback
     if not np.isfinite(raw_cov).all():
-        st.write("Cov matrix still has non-finite values => fallback to equal weights.")
+        st.write("DEBUG => Cov matrix non-finite => eq weights fallback.")
         return np.ones(n)/n
 
-    # 6) Build riskfolio Portfolio
     port = rf.Portfolio(returns=df_ret)
     port.mu = pd.Series(raw_mu, index=df_ret.columns)
     port.cov = pd.DataFrame(raw_cov, index=df_ret.columns, columns=df_ret.columns)
 
-    # Prepare class->list-of-index
     from collections import defaultdict
     class2idx = defaultdict(list)
     for i, cl_ in enumerate(asset_classes):
@@ -273,8 +289,12 @@ def param_max_sharpe_aclass_subtype(
         A_ineq.append(row)
         b_ineq.append(-limit)
 
-    # keep_current => old +/- buffer
+    st.write("DEBUG => keep_current:", keep_current)
+    st.write("DEBUG => class_constraints:", class_constraints)
+    st.write("DEBUG => subtype_constraints:", subtype_constraints)
+
     if keep_current and old_class_alloc is not None:
+        st.write("DEBUG => keep_current constraints in effect!")
         for cl, oldw in old_class_alloc.items():
             idxs = class2idx[cl]
             if not idxs:
@@ -284,7 +304,7 @@ def param_max_sharpe_aclass_subtype(
             add_sum_le(idxs, hi)
             add_sum_ge(idxs, lo)
     else:
-        # custom class constraints
+        st.write("DEBUG => custom constraints in effect!")
         for cl, cdict in class_constraints.items():
             idxs = class2idx[cl]
             if not idxs:
@@ -319,21 +339,20 @@ def param_max_sharpe_aclass_subtype(
         port.ainequality = A_
         port.binequality = b_
 
-    # 7) Solve for Max Sharpe
     try:
         w_sol = port.optimization(
             model='Classic',
             rm='MV',
             obj='Sharpe',
-            rf=daily_rf* frequency,
+            rf=daily_rf * frequency,
             hist=True
         )
     except Exception as e:
         st.write("Solver exception:", e)
-        # fallback => equal weights
         return np.ones(n)/n
 
     if w_sol is None:
+        st.write("DEBUG => w_sol is None => eq weights fallback.")
         return np.ones(n)/n
 
     return w_sol.values.flatten()
@@ -362,32 +381,33 @@ def rolling_shifted_backtest(
     do_shrink_cov: bool,
     beta_cov: float
 ) -> (pd.Series, pd.DataFrame):
-    """
-    Rolling SHIFT-based backtest with rebalancing. 
-    Uses param_max_sharpe_aclass_subtype(...) each rebalance.
-    """
+
     dfp = df_prices.sort_index().ffill().bfill()
     all_dt = dfp.index
     if len(all_dt) < 21:
+        st.write("DEBUG => Not enough rows => empty.")
         return pd.Series([], dtype=float), pd.DataFrame([])
     lb_days = lookback_m * 21
 
-    # SHIFT
     if user_start < all_dt[0]:
         user_start = all_dt[0]
     if user_start > all_dt[-1]:
+        st.write("DEBUG => user_start beyond last date => empty.")
         return pd.Series([], dtype=float), pd.DataFrame([])
     idx_0 = all_dt.get_indexer([user_start], method='bfill')[0]
     if idx_0 < lb_days:
         idx_0 = lb_days
     if idx_0 >= len(all_dt):
+        st.write("DEBUG => idx_0 >= len(all_dt) => empty.")
         return pd.Series([], dtype=float), pd.DataFrame([])
     SHIFT_day = all_dt[idx_0]
 
-    # monthly rebal
+    st.write("DEBUG rolling => user_start:", user_start, "SHIFT_day:", SHIFT_day, " idx_0:", idx_0)
+
     def last_day_of_month(d):
         nm = d + relativedelta(months=1)
         return nm.replace(day=1) - pd.Timedelta(days=1)
+
     rebal_cands = []
     if SHIFT_day < all_dt[-1]:
         c = last_day_of_month(SHIFT_day)
@@ -399,8 +419,9 @@ def rolling_shifted_backtest(
         arr = all_dt[all_dt >= d]
         return arr[0] if len(arr) > 0 else all_dt[-1]
     rebal_dates = sorted({shift_valid(x) for x in rebal_cands})
+    st.write("DEBUG => rebal_cands:", rebal_cands)
+    st.write("DEBUG => rebal_dates:", rebal_dates)
 
-    # old class allocation if keep_current
     old_class_alloc = {}
     if keep_current:
         df_instruments["Value"] = df_instruments["#Quantity"] * df_instruments["#Last_Price"]
@@ -411,7 +432,6 @@ def rolling_shifted_backtest(
         grp = df_instruments.groupby("#Asset")["Weight_Old"].sum()
         old_class_alloc = grp.to_dict()
 
-    # build col->(class, stype)
     tk_map_cls = {}
     tk_map_stp = {}
     for _, r_ in df_instruments.iterrows():
@@ -449,7 +469,7 @@ def rolling_shifted_backtest(
         if day in rebal_dates and d >= lb_days:
             sub_ret = df_ret.iloc[d - lb_days:d]
             old_w = (shares * px_) / curr_val if curr_val > 1e-12 else np.zeros(nA)
-            # solver
+
             w_raw = param_max_sharpe_aclass_subtype(
                 df_returns=sub_ret,
                 tickers=col_list,
@@ -469,13 +489,15 @@ def rolling_shifted_backtest(
                 do_shrink_cov=do_shrink_cov,
                 beta_cov=beta_cov
             )
-            # trade buffer
+            if len(w_raw) != nA:
+                st.write("DEBUG => w_raw is empty => skip rebal.")
+                continue
+
             if trade_buffer_pct > 1e-12:
                 w_final = apply_trade_buffer(old_w, w_raw, trade_buffer_pct)
             else:
                 w_final = w_raw
 
-            # tx cost
             cost = compute_tx_cost(curr_val, old_w, w_final, tx_cost_value, tx_cost_type)
             new_val = curr_val - cost
             if new_val < 0:
@@ -498,6 +520,8 @@ def rolling_shifted_backtest(
     sr_line = pd.Series(daily_vals, index=all_dt[idx_0:], name="New_Ptf")
     if len(sr_line) > 1 and sr_line.iloc[0] > 1e-12:
         sr_line = sr_line / sr_line.iloc[0]
+
+    st.write("DEBUG => Rebalance log shape:", len(rebal_log))
     return sr_line, pd.DataFrame(rebal_log)
 
 #####################################################
@@ -520,13 +544,10 @@ def run_one_combo(
     do_ewm: bool = False,
     ewm_alpha: float = 0.06
 ) -> dict:
-    """
-    combo => typically (alpha_mean, beta_cov, rebal_freq, lookback_m)
-    We'll map them to the actual arguments that rolling_shifted_backtest requires.
-    """
     alpha_mean, beta_cov, rebal_freq, lookback_m = combo
+    st.write("DEBUG run_one_combo => combo:", combo)
 
-    sr_line, _ = rolling_shifted_backtest(
+    sr_line, df_reb = rolling_shifted_backtest(
         df_prices=df_prices,
         df_instruments=df_instruments,
         user_start=df_prices.index[0],  # or user-chosen start
@@ -547,8 +568,12 @@ def run_one_combo(
         do_shrink_cov=do_shrink_cov,
         beta_cov=beta_cov
     )
+
+    st.write("DEBUG run_one_combo => final sr_line shape:", sr_line.shape)
     if len(sr_line) < 2:
+        st.write("DEBUG => sr_line too short => returning 0 metrics.")
         return {"Sharpe Ratio": 0.0, "Annual Ret": 0.0, "Annual Vol": 0.0}
+
     metrics_ = compute_extended_metrics(sr_line, daily_rf)
     return {
         "Sharpe Ratio": metrics_["Sharpe"],
@@ -577,11 +602,9 @@ def rolling_bayesian_optimization(
 
     n_calls = st.number_input("Number of Bayesian evaluations (n_calls)", 5, 500, 15, step=5)
 
-    # Let user choose possible rebal frequencies
     freq_choices = st.multiselect("Possible Rebal Frequencies (months)", [1, 3, 6], default=[1, 3, 6])
     if not freq_choices:
         freq_choices = [1]
-    # Let user choose possible lookback windows
     lb_choices = st.multiselect("Possible Lookback Windows (months)", [3, 6, 12], default=[3, 6, 12])
     if not lb_choices:
         lb_choices = [3]
@@ -598,7 +621,6 @@ def rolling_bayesian_optimization(
     ewm_alpha_min = st.slider("EWM alpha min",0.0,1.0,0.0,0.05)
     ewm_alpha_max = st.slider("EWM alpha max",0.0,1.0,1.0,0.05)
 
-    # We'll need asset_cls_list, sec_type_list
     tk_map_cls = {}
     tk_map_stp = {}
     for _, r_ in df_instruments.iterrows():
@@ -642,11 +664,11 @@ def rolling_bayesian_optimization(
         do_ewm_    = x[4]
         ewm_alpha_ = x[5]
 
-        # Quick fix if do_ewm is True
         if do_ewm_:
             ewm_alpha_ = max(1e-12, min(ewm_alpha_, 1.0))
 
         combo = (alpha_, beta_, freq_, lb_)
+        st.write("DEBUG => Bayesian iteration => x=", x, " => combo=", combo)
         result = run_one_combo(
             df_prices=df_prices,
             df_instruments=df_instruments,
@@ -699,7 +721,7 @@ def rolling_bayesian_optimization(
 # Main Application
 #####################################################
 def main():
-    st.title("Shift-based Rolling + Riskfolio + Bayesian Integration (with NaN checks)")
+    st.title("Shift-based Rolling + Riskfolio + Further Debugging of sr_line")
 
     # 1) Upload and parse
     xfile = st.file_uploader("Upload Excel", type=["xlsx"])
@@ -714,12 +736,12 @@ def main():
 
     coverage = st.slider("Coverage fraction =>",0.0,1.0,0.8,0.05)
     df_clean = clean_df_prices(df_prices, coverage)
-    st.write(f"Data => shape={df_clean.shape}, from {df_clean.index.min()} to {df_clean.index.max()}")
+    st.write(f"DEBUG => Clean data => shape={df_clean.shape}, from {df_clean.index.min()} to {df_clean.index.max()}")
 
     # Build "Old" portfolio line
     df_instruments["Value"] = df_instruments["#Quantity"]* df_instruments["#Last_Price"]
     totv = df_instruments["Value"].sum()
-    if totv <= 0: 
+    if totv <= 0:
         totv = 1.0
     df_instruments["Weight_Old"] = df_instruments["Value"]/ totv
     old_line = build_old_portfolio_line(df_instruments, df_clean)
@@ -754,7 +776,7 @@ def main():
         with cA:
             mi_= st.number_input(f"Min {acl}-{stp}", 0.0,100.0,0.0,1.0)/100.0
         with cB:
-            mx_= st.number_input(f"Max {acl}-{stp}", 0.0,100.0,10.0,1.0)/100.0
+            mx_= st.number_input(f"Max {acl}-{stp}", 0.0,100.0,100.0,1.0)/100.0
         subtype_constraints[(acl, stp)] = {
             "min_instrument": mi_,
             "max_instrument": mx_
@@ -762,6 +784,8 @@ def main():
 
     # 3) Transaction cost, daily RF
     drf= st.number_input("DailyRf(%) =>",0.0,10.0,0.0,0.1)/100.0
+    st.write(f"DEBUG => dailyRf={drf}, annualRf approx => {drf*252:.4f}")
+
     tr_buf = st.number_input("Trade Buffer(%) =>",0.0,20.0,1.0,1.0)/100.0
     tx_type= st.selectbox("TxCost =>",["percentage","ticket_fee"], index=0)
     if tx_type=="percentage":
@@ -780,11 +804,15 @@ def main():
         do_ewm= st.checkbox("Use EWMA?",False)
         ewm_a= st.slider("EWMA alpha =>",0.0,1.0,0.06,0.01)
         do_smu= st.checkbox("Shrink Means?",False)
-        alpha_m= st.slider("Alpha mean =>",0.0,1.0,0.3,0.01)
+        alpha_m= st.slider("Alpha mean =>",0.0,1.0,0.3,0.05)
         do_sco= st.checkbox("Shrink Cov?",False)
-        beta_c= st.slider("Beta cov =>",0.0,1.0,0.2,0.01)
+        beta_c= st.slider("Beta cov =>",0.0,1.0,0.2,0.05)
 
         if st.button("Run Rolling"):
+            st.write("DEBUG => running SHIFT-based backtest. c_mode =>", c_mode)
+            st.write("DEBUG => class_sum_constraints =>", class_sum_constraints)
+            st.write("DEBUG => subtype_constraints =>", subtype_constraints)
+
             sr_line, df_reb= rolling_shifted_backtest(
                 df_prices=df_clean,
                 df_instruments=df_instruments,
@@ -806,14 +834,40 @@ def main():
                 do_shrink_cov= do_sco,
                 beta_cov= beta_c
             )
+            st.write("DEBUG => returned sr_line shape:", sr_line.shape)
+            st.write("DEBUG => rebal_log shape:", df_reb.shape)
+
             if len(sr_line)<2:
-                st.warning("No backtest results.")
+                st.warning("No backtest results => sr_line too short.")
                 return
 
+            # 1) Show if sr_line is constant or NaN
+            st.write("DEBUG => sr_line unique =>", sr_line.unique())
+            st.write("DEBUG => sr_line.nunique =>", sr_line.nunique())
+            st.write("DEBUG => sr_line.isna().sum =>", sr_line.isna().sum())
+
+            # 2) Print the top/bottom of sr_line
+            st.write("DEBUG => sr_line HEAD(30) =>\n", sr_line.head(30))
+            st.write("DEBUG => sr_line TAIL(30) =>\n", sr_line.tail(30))
+
+            # 3) daily returns
+            new_ret = sr_line.pct_change().dropna()
+            st.write("DEBUG => new_ret HEAD(30):\n", new_ret.head(30))
+            st.write("DEBUG => new_ret TAIL(30):\n", new_ret.tail(30))
+            st.write("DEBUG => new_ret.describe =>", new_ret.describe())
+
+            # 4) Check underlying data from SHIFT day onward
             SHIFTd= sr_line.index[0]
+            sub_df = df_clean.loc[SHIFTd:].copy()
+            st.write("DEBUG => Underlying data from SHIFT day => shape:", sub_df.shape)
+            st.write("DEBUG => sub_df HEAD(10):\n", sub_df.head(10))
+            st.write("DEBUG => sub_df TAIL(10):\n", sub_df.tail(10))
+            st.write("DEBUG => sub_df.describe =>", sub_df.describe())
+
+            # Now plot vs old
             old_slice= old_line.loc[old_line.index >= SHIFTd].copy()
             if len(old_slice)<2:
-                st.warning("No overlap SHIFT vs Old")
+                st.warning("No overlap SHIFT vs Old => old_slice too short.")
                 return
             if old_slice.iloc[0]>1e-12:
                 old_slice= old_slice/ old_slice.iloc[0]
