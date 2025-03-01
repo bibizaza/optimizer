@@ -11,7 +11,9 @@ from dateutil.relativedelta import relativedelta
 # Import extended metrics
 from modules.analytics.extended_metrics import compute_extended_metrics
 
-
+###########################################################
+# Original Parametric Rolling Code (UNCHANGED)
+###########################################################
 def last_day_of_month(date: pd.Timestamp) -> pd.Timestamp:
     next_m = date + relativedelta(months=1)
     return next_m.replace(day=1) - pd.Timedelta(days=1)
@@ -290,6 +292,7 @@ def rolling_grid_search(
                 result_dict = future.result()
             except Exception as exc:
                 st.error(f"Error for combo {combo}: {exc}")
+                import traceback
                 st.text(traceback.format_exc())
                 n_pts, alpha_, beta_, freq_, lb_ = combo
                 result_dict = {
@@ -314,3 +317,128 @@ def rolling_grid_search(
     total_elapsed = time.time() - start_time
     progress_text.text(f"Grid search done in {total_elapsed:.1f}s.")
     return pd.DataFrame(df_out)
+
+
+###########################################################
+# NEW: Rolling Backtest with Direct Sharpe (No Param)
+###########################################################
+def rolling_backtest_monthly_direct_sharpe(
+    df_prices: pd.DataFrame,
+    df_instruments: pd.DataFrame,
+    direct_sharpe_fn,  # just like param_sharpe_fn, but calls direct solver
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    months_interval: int = 1,
+    window_days: int = 252,
+    transaction_cost_value: float = 0.0,
+    transaction_cost_type: str = "percentage",
+    trade_buffer_pct: float = 0.0,
+    daily_rf: float = 0.0
+) -> tuple[
+    pd.Series,
+    np.ndarray,
+    np.ndarray,
+    pd.Timestamp,
+    pd.DataFrame,
+    dict
+]:
+    """
+    Same monthly rolling logic as the param approach, but calls direct_sharpe_fn(sub_ret)
+    instead of param_sharpe_fn(sub_ret).
+    
+    The direct_sharpe_fn is expected to return (w_opt, summary),
+    with w_opt as the portfolio weights.
+    
+    We do not change any constraints or logic aside from using a different solver function.
+    """
+    df_prices = df_prices.sort_index().loc[start_date:end_date]
+    if len(df_prices) < 2:
+        empty_line = pd.Series([1.0], index=df_prices.index[:1], name="Rolling_Ptf")
+        empty_df = pd.DataFrame(columns=["Date","OldWeights","NewWeights","TxCost","PortValBefore","PortValAfter"])
+        return empty_line, np.zeros(df_prices.shape[1]), np.zeros(df_prices.shape[1]), None, empty_df, {}
+
+    rebal_dates = build_monthly_rebal_dates(df_prices.index[0], df_prices.index[-1],
+                                            months_interval, df_prices)
+    dates = df_prices.index
+    n_days = len(dates)
+    n_assets = df_prices.shape[1]
+
+    rolling_val = 1.0
+    shares = np.zeros(n_assets)
+    p0 = df_prices.iloc[0].fillna(0.0).values
+    valid_mask = (p0 > 0)
+    if valid_mask.sum() > 0:
+        eq_w = 1.0 / valid_mask.sum()
+        for i in range(n_assets):
+            if valid_mask[i]:
+                shares[i] = (rolling_val * eq_w) / p0[i]
+
+    daily_vals = [np.sum(shares * p0)]
+    df_returns = df_prices.pct_change().fillna(0.0)
+
+    last_w_final = np.zeros(n_assets)
+    final_old_w_last = np.zeros(n_assets)
+    final_rebal_date = None
+    rebal_events = []
+
+    for d in range(1, n_days):
+        day = dates[d]
+        prices_today = df_prices.loc[day].fillna(0.0).values
+        rolling_val = np.sum(shares * prices_today)
+        daily_vals.append(rolling_val)
+
+        if day in rebal_dates and d > 0:
+            sum_price_shares = np.sum(shares * prices_today)
+            if sum_price_shares <= 1e-12:
+                old_w = np.zeros(n_assets)
+            else:
+                old_w = (shares * prices_today) / sum_price_shares
+            final_old_w_last = old_w.copy()
+            final_rebal_date = day
+
+            start_idx = max(0, d - window_days)
+            sub_ret = df_returns.iloc[start_idx:d]
+            w_opt, _ = direct_sharpe_fn(sub_ret)
+
+            if trade_buffer_pct > 0:
+                if "apply_trade_buffer" in globals():
+                    w_adj = apply_trade_buffer(old_w, w_opt, trade_buffer_pct)
+                else:
+                    w_adj = w_opt
+            else:
+                w_adj = w_opt
+
+            cost = compute_transaction_cost(rolling_val, old_w, w_adj,
+                                            transaction_cost_value, transaction_cost_type)
+            old_val = rolling_val
+            rolling_val -= cost
+            if rolling_val < 0:
+                rolling_val = 0.0
+
+            money_alloc = rolling_val * w_adj
+            shares = np.zeros(n_assets)
+            for i in range(n_assets):
+                if w_adj[i] > 1e-15 and prices_today[i] > 0:
+                    shares[i] = money_alloc[i] / prices_today[i]
+
+            last_w_final = w_adj.copy()
+
+            rebal_events.append({
+                "Date": day,
+                "OldWeights": old_w.copy(),
+                "NewWeights": w_opt.copy(),
+                "TxCost": cost,
+                "PortValBefore": old_val,
+                "PortValAfter": rolling_val
+            })
+
+    sr = pd.Series(daily_vals, index=dates, name="Rolling_Ptf")
+    if sr.iloc[0] <= 0:
+        sr.iloc[0] = 1.0
+    sr_norm = sr / sr.iloc[0]
+    sr_norm.name = "Rolling_Ptf"
+
+    df_rebal = pd.DataFrame(rebal_events)
+    ext_metrics = compute_extended_metrics(sr_norm, daily_rf=daily_rf)
+
+    return sr_norm, last_w_final, final_old_w_last, final_rebal_date, df_rebal, ext_metrics
