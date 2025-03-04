@@ -10,7 +10,9 @@ from modules.optimization.utils.cov_shrink import (
 )
 from modules.optimization.utils.mean_shrink import shrink_mean_to_grand_mean
 
-
+###############################################################################
+# 1) Parametric Approach (Frontier scanning => n_points)
+###############################################################################
 def parametric_max_sharpe_aclass_subtype(
     df_returns: pd.DataFrame,
     tickers: list[str],
@@ -31,8 +33,10 @@ def parametric_max_sharpe_aclass_subtype(
     ewm_alpha: float = 0.06
 ):
     """
-    Parametric approach => scan candidate target returns in [targ_min, targ_max],
-    pick best Sharpe. This REQUIRES n_points to set how many target returns we test.
+    1) We build many candidate target returns in [targ_min, targ_max].
+    2) For each, we solve a QP that minimizes vol subject to return >= target.
+    3) We pick the solution with best ex-post Sharpe.
+    4) We skip scs or reorder solver preference => prefer ECOS, skip SCS if memory fails.
     """
     if security_types is None:
         security_types = ["Unknown"] * df_returns.shape[1]
@@ -45,7 +49,7 @@ def parametric_max_sharpe_aclass_subtype(
     if len(security_types) != n:
         raise ValueError("security_types length mismatch.")
 
-    # Covariance
+    # Build covariance
     if do_ewm:
         cov_raw = compute_ewm_cov(df_returns, alpha=ewm_alpha)
     else:
@@ -62,6 +66,7 @@ def parametric_max_sharpe_aclass_subtype(
     cov_fixed = cov_raw + SHIFT_EPS * np.eye(n)
     cov_expr = cp.psd_wrap(cov_fixed)
 
+    # Mean returns
     mean_ret = df_returns.mean().values
     if shrink_means and alpha > 0:
         mean_ret = shrink_mean_to_grand_mean(mean_ret, alpha)
@@ -70,7 +75,7 @@ def parametric_max_sharpe_aclass_subtype(
     best_sharpe = -np.inf
     best_w = np.ones(n) / n
 
-    # We scan n_points in [minRet, maxRet]
+    # Build candidate target returns in [targ_min, targ_max]
     asset_ann_ret = mean_ret * 252
     targ_min = max(0.0, asset_ann_ret.min())
     targ_max = asset_ann_ret.max()
@@ -78,57 +83,61 @@ def parametric_max_sharpe_aclass_subtype(
 
     for targ in candidate_targets:
         w = cp.Variable(n)
-        obj = cp.Minimize(cp.quad_form(w, cov_expr))
-        constr = [cp.sum(w) == 1]
+        objective = cp.Minimize(cp.quad_form(w, cov_expr))
+        constraints = [cp.sum(w) == 1]
         if no_short:
-            constr.append(w >= 0)
+            constraints.append(w >= 0)
 
-        # Return constraint => annual
-        constr.append((mean_ret @ w)*252 >= targ)
+        # Return constraint => (mean_ret @ w)*252 >= targ
+        constraints.append((mean_ret @ w)*252 >= targ)
 
-        # Class constraints
+        # Class-level constraints
         unique_cls = set(asset_classes)
-        for cl_ in unique_cls:
-            idxs = [i for i, a_ in enumerate(asset_classes) if a_ == cl_]
-            cdict = class_constraints.get(cl_, {})
+        for cl in unique_cls:
+            idxs = [i for i,a_ in enumerate(asset_classes) if a_ == cl]
+            cdict = class_constraints.get(cl, {})
             min_class = cdict.get("min_class_weight", 0.0)
             max_class = cdict.get("max_class_weight", 1.0)
-            constr.append(cp.sum(w[idxs]) >= min_class)
-            constr.append(cp.sum(w[idxs]) <= max_class)
+            constraints.append(cp.sum(w[idxs]) >= min_class)
+            constraints.append(cp.sum(w[idxs]) <= max_class)
 
-            # Subtype
+            # Subtype constraints
             for i_ in idxs:
                 stp = security_types[i_]
-                if (cl_, stp) in subtype_constraints:
-                    stvals = subtype_constraints[(cl_, stp)]
-                    mini = stvals.get("min_instrument", 0.0)
-                    maxi = stvals.get("max_instrument", 1.0)
-                    constr.append(w[i_] >= mini)
-                    constr.append(w[i_] <= maxi)
+                if (cl, stp) in subtype_constraints:
+                    stvals = subtype_constraints[(cl, stp)]
+                    min_inst = stvals.get("min_instrument", 0.0)
+                    max_inst = stvals.get("max_instrument", 1.0)
+                    constraints.append(w[i_] >= min_inst)
+                    constraints.append(w[i_] <= max_inst)
 
-        prob = cp.Problem(obj, constr)
+        prob = cp.Problem(objective, constraints)
+
+        # Instead of [cp.SCS, cp.ECOS], let's prefer just ECOS or reorder
         solved = False
-        for solver_ in [cp.SCS, cp.ECOS]:
+        for solver_ in [cp.ECOS]:
             try:
                 prob.solve(solver=solver_, verbose=False)
                 if prob.status in ["optimal","optimal_inaccurate"] and w.value is not None:
                     solved = True
                     break
-            except (cp.error.SolverError, cp.error.DCPError):
+            except (cp.error.SolverError, cp.error.DCPError) as e:
                 pass
+
         if not solved:
+            # skip this target if solver fails
             continue
 
         w_val = w.value
         vol_ann = np.sqrt(w_val.T @ cov_fixed @ w_val) * np.sqrt(252)
         ret_ann = (mean_ret @ w_val)*252
         sr_ = (ret_ann - ann_rf)/(vol_ann+1e-12) if vol_ann>1e-12 else -np.inf
-        if sr_> best_sharpe:
-            best_sharpe= sr_
-            best_w= w_val.copy()
+        if sr_ > best_sharpe:
+            best_sharpe = sr_
+            best_w = w_val.copy()
 
     final_ret = (mean_ret @ best_w)*252
-    final_vol = np.sqrt(best_w.T@ cov_fixed@ best_w)* np.sqrt(252)
+    final_vol = np.sqrt(best_w.T @ cov_fixed @ best_w)* np.sqrt(252)
     summary = {
         "Annual Return (%)": round(final_ret, 2),
         "Annual Vol (%)": round(final_vol, 2),
@@ -136,7 +145,9 @@ def parametric_max_sharpe_aclass_subtype(
     }
     return best_w, summary
 
-
+###############################################################################
+# 2) Direct Approach => single solve => no n_points scanning
+###############################################################################
 def direct_max_sharpe_aclass_subtype(
     df_returns: pd.DataFrame,
     tickers: list[str],
@@ -144,36 +155,35 @@ def direct_max_sharpe_aclass_subtype(
     security_types: list[str],
     class_constraints: dict,
     subtype_constraints: dict,
-    daily_rf: float=0.0,
-    no_short: bool=True,
-    regularize_cov: bool=False,
-    shrink_means: bool=False,
-    alpha: float=0.3,
-    shrink_cov: bool=False,
-    beta: float=0.2,
-    use_ledoitwolf: bool=False,
-    do_ewm: bool=False,
-    ewm_alpha: float=0.06
+    daily_rf: float = 0.0,
+    no_short: bool = True,
+    regularize_cov: bool = False,
+    shrink_means: bool = False,
+    alpha: float = 0.3,
+    shrink_cov: bool = False,
+    beta: float = 0.2,
+    use_ledoitwolf: bool = False,
+    do_ewm: bool = False,
+    ewm_alpha: float = 0.06
 ):
     """
-    Direct approach => single solve that tries to maximize (mean_annual@ w - ann_rf).
-    Then ex-post we compute Sharpe => (ret_ann - ann_rf)/ vol_ann
-    No 'n_points' => no scanning.
+    We do a single solve => Maximize mean_annual@w - ann_rf => ex post we get Sharpe = ...
+    Reordered solver preference => prefer ECOS, skip SCS if memory errors arise
     """
     if security_types is None:
-        security_types = ["Unknown"]* df_returns.shape[1]
+        security_types = ["Unknown"] * df_returns.shape[1]
 
-    n= len(tickers)
-    if df_returns.shape[1]!= n:
-        raise ValueError("df_returns shape mismatch.")
-    if len(asset_classes)!=n:
+    n = len(tickers)
+    if df_returns.shape[1] != n:
+        raise ValueError("df_returns shape mismatch with number of tickers.")
+    if len(asset_classes) != n:
         raise ValueError("asset_classes length mismatch.")
-    if len(security_types)!=n:
+    if len(security_types) != n:
         raise ValueError("security_types length mismatch.")
 
     # Cov
     if do_ewm:
-        cov_raw = compute_ewm_cov(df_returns, alpha= ewm_alpha)
+        cov_raw = compute_ewm_cov(df_returns, alpha=ewm_alpha)
     else:
         if use_ledoitwolf:
             cov_raw = ledoitwolf_cov(df_returns)
@@ -184,8 +194,8 @@ def direct_max_sharpe_aclass_subtype(
             if shrink_cov and beta>0:
                 cov_raw = shrink_cov_diagonal(cov_raw, beta)
 
-    SHIFT_EPS =1e-8
-    cov_fixed = cov_raw + SHIFT_EPS* np.eye(n)
+    SHIFT_EPS = 1e-8
+    cov_fixed = cov_raw + SHIFT_EPS*np.eye(n)
 
     mean_daily = df_returns.mean().values
     if shrink_means and alpha>0:
@@ -199,7 +209,7 @@ def direct_max_sharpe_aclass_subtype(
         constr.append(w>=0)
 
     # Class constraints
-    unique_cls = set(asset_classes)
+    unique_cls= set(asset_classes)
     for cl_ in unique_cls:
         idxs= [i for i,a_ in enumerate(asset_classes) if a_== cl_]
         cdict= class_constraints.get(cl_, {})
@@ -208,7 +218,7 @@ def direct_max_sharpe_aclass_subtype(
         constr.append(cp.sum(w[idxs])>= min_class)
         constr.append(cp.sum(w[idxs])<= max_class)
 
-        # subType
+        # subType constraints
         for i_ in idxs:
             stp= security_types[i_]
             if (cl_, stp) in subtype_constraints:
@@ -218,32 +228,38 @@ def direct_max_sharpe_aclass_subtype(
                 constr.append(w[i_]>= mini)
                 constr.append(w[i_]<= maxi)
 
+    # Maximize => mean_annual@ w - ann_rf
     obj= cp.Maximize(mean_annual@ w - ann_rf)
     prob= cp.Problem(obj, constr)
 
     solved= False
     best_w= np.zeros(n)
-    for solver_ in [cp.ECOS, cp.SCS]:
+    # Only try ECOS first => skip SCS
+    for solver_ in [cp.ECOS]:
         try:
             prob.solve(solver=solver_, verbose=False)
             if prob.status in ["optimal","optimal_inaccurate"] and w.value is not None:
                 solved= True
                 break
-        except (cp.error.SolverError, cp.error.DCPError):
+        except (cp.error.SolverError, cp.error.DCPError) as e:
             pass
 
     if not solved:
-        summary= {"Annual Return (%)":0.0,"Annual Vol (%)":0.0,"Sharpe Ratio":0.0}
+        # Return zeros
+        summary= {
+            "Annual Return (%)": 0.0,
+            "Annual Vol (%)": 0.0,
+            "Sharpe Ratio": 0.0
+        }
         return best_w, summary
 
     w_val= w.value
-    invests= np.sum(w_val)
     ret_ann= mean_annual@ w_val
     var_daily= w_val.T@ cov_fixed@ w_val
     vol_ann= np.sqrt(var_daily)* np.sqrt(252)
     sr_= -np.inf
     if vol_ann>1e-12:
-        sr_= (ret_ann - ann_rf)/ vol_ann
+        sr_= (ret_ann- ann_rf)/ vol_ann
 
     best_w= w_val.copy()
     summary= {
