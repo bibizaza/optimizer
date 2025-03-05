@@ -157,7 +157,7 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
 # main app
 ##########################################################################
 def main():
-    st.title("Optima Rolling Backtest + Extended Metrics")
+    st.title("Optimize Your Portfolio")
 
     # 1) Data + constraints
     df_instruments, df_prices, coverage, main_constr = sidebar_data_and_constraints()
@@ -177,7 +177,7 @@ def main():
 
     # 2) Clean data
     df_prices_clean = clean_df_prices(df_prices, coverage)
-    st.write(f"**Clean data** => shape={df_prices_clean.shape}, range=({df_prices_clean.index.min()}..{df_prices_clean.index.max()})")
+    #st.write(f"**Clean data** => shape={df_prices_clean.shape}, range=({df_prices_clean.index.min()}..{df_prices_clean.index.max()})")
 
     # DEBUG / CLEAN => drop columns that remain fully NaN, replace inf
     nan_cols = [c for c in df_prices_clean.columns if df_prices_clean[c].isna().all()]
