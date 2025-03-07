@@ -9,7 +9,7 @@ import time
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
-# Import run_one_combo using dot-separated module path
+# This function presumably runs one combo with the chosen solver approach
 from modules.backtesting.rolling_gridsearch import run_one_combo
 
 
@@ -26,16 +26,20 @@ def rolling_bayesian_optimization(
     trade_buffer_pct: float
 ) -> pd.DataFrame:
     """
-    Bayesian Optimization over multiple parameters.
-
-    If "Use Direct Solver" is True, we hide the 'n_points' (efficient frontier points),
-    because the direct solver approach doesn't require scanning multiple points.
+    Bayesian Optimization over multiple parameters, with a solver approach:
+    - "Parametric (cvxpy)" => n_points in param space
+    - "Direct (cvxpy)" => no frontier scanning needed
     """
 
     st.write("## Bayesian Optimization")
 
-    # 1) Option to use direct solver vs. param solver
-    use_direct_solver = st.checkbox("Use Direct Solver for Bayesian?", value=False)
+    # 1) Let user pick solver approach: Param or Direct
+    solver_choice = st.radio(
+        "Solver Approach for Bayesian?",
+        ["Parametric (cvxpy)", "Direct (cvxpy)"],
+        index=0
+    )
+    use_direct_solver = (solver_choice == "Direct (cvxpy)")
 
     # 2) Number of Bayesian evaluations
     n_calls = st.number_input("Number of Bayesian evaluations (n_calls)", 5, 500, 20, step=5)
@@ -90,7 +94,6 @@ def rolling_bayesian_optimization(
     # --------------------------------------------------------------
     # 5) Build the parameter space
     # --------------------------------------------------------------
-    # a) Common space
     space_common = [
         Real(alpha_min, alpha_max, name="alpha_"),
         Real(beta_min, beta_max, name="beta_"),
@@ -100,7 +103,6 @@ def rolling_bayesian_optimization(
         Real(ewm_alpha_min, ewm_alpha_max, name="ewm_alpha_")
     ]
 
-    # b) If NOT using direct solver => include n_points_space
     if use_direct_solver:
         # Direct approach => no n_points in the space
         space = space_common
@@ -178,7 +180,7 @@ def rolling_bayesian_optimization(
                 do_ledoitwolf=False,
                 do_ewm=do_ewm_,
                 ewm_alpha=ewm_alpha_,
-                use_direct_solver=use_direct_solver  # important param
+                use_direct_solver=use_direct_solver  # pass solver approach
             )
 
             sr_val = result_dict["Sharpe Ratio"]
@@ -195,6 +197,7 @@ def rolling_bayesian_optimization(
                 "Annual Vol": result_dict["Annual Vol"]
             })
 
+            # Minimizing negative Sharpe => return -SR
             if np.isnan(sr_val) or np.isinf(sr_val):
                 return 1e9
             return -sr_val
