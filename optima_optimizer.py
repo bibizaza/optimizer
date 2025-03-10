@@ -3,8 +3,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import traceback
-import io
 import time
 from dateutil.relativedelta import relativedelta
 import concurrent.futures
@@ -29,6 +27,8 @@ from modules.analytics.extended_metrics import compute_extended_metrics
 from modules.backtesting.rolling_monthly import (
     rolling_backtest_monthly_param_sharpe,
     rolling_backtest_monthly_direct_sharpe,
+    rolling_backtest_monthly_param_cvar,     # NEW
+    rolling_backtest_monthly_direct_cvar,    # NEW
     compute_cost_impact,
     rolling_grid_search
 )
@@ -43,13 +43,13 @@ from modules.backtesting.max_drawdown import (
 # Bayesian
 from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
 
-# UPDATED imports: We now import from the two separate CVXPY modules:
-from modules.optimization.cvxpy_parametric import (
-    parametric_max_sharpe_aclass_subtype
-)
-from modules.optimization.cvxpy_direct import (
-    direct_max_sharpe_aclass_subtype
-)
+# Markowitz imports
+from modules.optimization.cvxpy_parametric import parametric_max_sharpe_aclass_subtype
+from modules.optimization.cvxpy_direct import direct_max_sharpe_aclass_subtype
+
+# CVaR imports
+from modules.optimization.cvxpy_parametric_cvar import parametric_min_cvar_aclass_subtype
+from modules.optimization.cvxpy_direct_cvar import direct_max_return_cvar_constraint_aclass_subtype
 
 # Optional efficient frontier
 from modules.optimization.efficient_frontier import (
@@ -180,7 +180,6 @@ def main():
 
     # 2) Clean data
     df_prices_clean = clean_df_prices(df_prices, coverage)
-    # DEBUG / CLEAN => drop columns that remain fully NaN, replace inf
     nan_cols = [c for c in df_prices_clean.columns if df_prices_clean[c].isna().all()]
     if nan_cols:
         st.write("DEBUG => dropping columns fully NaN =>", nan_cols)
@@ -246,40 +245,69 @@ def main():
     )
 
     if top_choice == "Portfolio Optimization":
-        # Let user pick solver => param vs direct
+        # Let user pick solver => param vs direct vs cvar
         solver_choice = st.selectbox(
             "Solver Approach:",
-            ["Parametric (cvxpy)", "Direct (cvxpy)"],  # Add "Riskfolio" or others if needed
+            [
+                "Parametric (cvxpy)",
+                "Direct (cvxpy)",
+                "Parametric (cvxpy CVaR)",
+                "Direct (cvxpy CVaR)"
+            ],
             index=0
         )
 
-        # Rolling parameters
         with st.expander("Rolling Parameters", expanded=False):
             rebal_freq = st.selectbox("Rebalance Frequency (months)", [1,3,6], index=0)
             lookback_m = st.selectbox("Lookback Window (months)", [3,6,12], index=0)
             window_days = lookback_m * 21
 
-            reg_cov = st.checkbox("Regularize Cov?", False)
-            do_ledoitwolf = st.checkbox("Use LedoitWolf Cov?", False)
-            do_ewm = st.checkbox("Use EWM Cov?", False)
-            ewm_alpha = st.slider("EWM alpha", 0.0, 1.0, 0.06, 0.01)
+            # Show variance-based parameters only if NOT cvar approach
+            if solver_choice not in ["Parametric (cvxpy CVaR)", "Direct (cvxpy CVaR)"]:
+                reg_cov = st.checkbox("Regularize Cov? (Var only)", False)
+                do_ledoitwolf = st.checkbox("Use LedoitWolf Cov? (Var only)", False)
+                do_ewm = st.checkbox("Use EWM Cov? (Var only)", False)
+                ewm_alpha = st.slider("EWM alpha (Var only)", 0.0, 1.0, 0.06, 0.01)
 
-            st.write("**Mean & Cov Shrink**")
-            do_shrink_means = st.checkbox("Shrink Means?", True)
-            alpha_shrink = st.slider("Alpha (for means)", 0.0, 1.0, 0.3, 0.01)
-            do_shrink_cov = st.checkbox("Shrink Cov (diagonal)?", True)
-            beta_shrink = st.slider("Beta (for cov)", 0.0, 1.0, 0.2, 0.01)
-
-            # n_points only relevant for param approach
-            if solver_choice == "Parametric (cvxpy)":
-                n_points_man = st.number_input("Frontier #points (Param Only)", 5,100,15, step=5)
+                st.write("**Mean & Cov Shrink (Var only)**")
+                do_shrink_means = st.checkbox("Shrink Means? (Var only)", True)
+                alpha_shrink = st.slider("Alpha (for means, Var only)", 0.0, 1.0, 0.3, 0.01)
+                do_shrink_cov = st.checkbox("Shrink Cov (diagonal, Var only)?", True)
+                beta_shrink = st.slider("Beta (for cov, Var only)", 0.0, 1.0, 0.2, 0.01)
             else:
-                n_points_man = 0
+                # hide or define defaults for cvar approach
+                reg_cov = False
+                do_ledoitwolf = False
+                do_ewm = False
+                ewm_alpha = 0.0
+                do_shrink_means = False
+                alpha_shrink = 0.0
+                do_shrink_cov = False
+                beta_shrink = 0.0
+
+            # n_points => param approach
+            n_points_man = 0
+            if solver_choice in ["Parametric (cvxpy)", "Parametric (cvxpy CVaR)"]:
+                n_points_man = st.number_input("Frontier #points (Param Only)", 5, 100, 15, step=5)
+
+            # For CVaR approach
+            cvar_alpha_in = 0.95
+            cvar_limit_in = 0.10
+            cvar_freq_user = "daily"
+            if solver_choice in ["Parametric (cvxpy CVaR)", "Direct (cvxpy CVaR)"]:
+                cvar_alpha_in = st.slider("CVaR alpha", 0.0, 0.9999, 0.95, 0.01)
+                cvar_limit_in = st.slider("CVaR limit (for direct approach)", 0.0, 1.0, 0.10, 0.01)
+                cvar_freq_user = st.selectbox(
+                    "CVaR Frequency Scale",
+                    ["daily","weekly","monthly","annual"],
+                    index=0
+                )
 
             run_button = st.button("Run Rolling")
 
         if run_button:
-            # 1) param solver function
+
+            # A) param_sharpe_fn => variance param
             def param_sharpe_fn(sub_ret: pd.DataFrame):
                 from modules.optimization.cvxpy_parametric import parametric_max_sharpe_aclass_subtype
                 w_opt, summary = parametric_max_sharpe_aclass_subtype(
@@ -303,7 +331,7 @@ def main():
                 )
                 return w_opt, summary
 
-            # 2) direct solver function
+            # B) direct_sharpe_fn => variance direct
             def direct_sharpe_fn(sub_ret: pd.DataFrame):
                 from modules.optimization.cvxpy_direct import direct_max_sharpe_aclass_subtype
                 w_opt, summary = direct_max_sharpe_aclass_subtype(
@@ -312,7 +340,7 @@ def main():
                     asset_classes=asset_cls_list,
                     security_types=sec_type_list,
                     class_constraints=class_sum_constraints,
-                    subtype_constraints= subtype_constraints,
+                    subtype_constraints=subtype_constraints,
                     daily_rf=daily_rf,
                     no_short=True,
                     regularize_cov=reg_cov,
@@ -326,9 +354,45 @@ def main():
                 )
                 return w_opt, summary
 
-            # Choose which rolling function to call
+            # C) param_cvar_fn => cvar param
+            def param_cvar_fn(sub_ret: pd.DataFrame):
+                from modules.optimization.cvxpy_parametric_cvar import parametric_min_cvar_aclass_subtype
+                w_opt, summary = parametric_min_cvar_aclass_subtype(
+                    df_returns=sub_ret,
+                    tickers=col_tickers,
+                    asset_classes=asset_cls_list,
+                    security_types=sec_type_list,
+                    class_constraints=class_sum_constraints,
+                    subtype_constraints=subtype_constraints,
+                    cvar_alpha=cvar_alpha_in,
+                    no_short=True,
+                    n_points=n_points_man,
+                    daily_rf=daily_rf,
+                    freq_choice=cvar_freq_user  # aggregator freq
+                )
+                return w_opt, summary
+
+            # D) direct_cvar_fn => cvar direct
+            def direct_cvar_fn(sub_ret: pd.DataFrame):
+                from modules.optimization.cvxpy_direct_cvar import direct_max_return_cvar_constraint_aclass_subtype
+                w_opt, summary = direct_max_return_cvar_constraint_aclass_subtype(
+                    df_returns=sub_ret,
+                    tickers=col_tickers,
+                    asset_classes=asset_cls_list,
+                    security_types=sec_type_list,
+                    class_constraints=class_sum_constraints,
+                    subtype_constraints=subtype_constraints,
+                    cvar_alpha=cvar_alpha_in,
+                    cvar_limit=cvar_limit_in,
+                    daily_rf=daily_rf,
+                    no_short=True,
+                    freq_choice=cvar_freq_user
+                )
+                return w_opt, summary
+
+            # Decide which rolling function to call
             if solver_choice == "Parametric (cvxpy)":
-                sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+                sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                     rolling_backtest_monthly_param_sharpe(
                         df_prices=df_sub,
                         df_instruments=df_instruments,
@@ -342,9 +406,9 @@ def main():
                         trade_buffer_pct=trade_buffer_pct,
                         daily_rf=daily_rf
                     )
-                )
-            else:  # "Direct (cvxpy)"
-                sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+
+            elif solver_choice == "Direct (cvxpy)":
+                sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                     rolling_backtest_monthly_direct_sharpe(
                         df_prices=df_sub,
                         df_instruments=df_instruments,
@@ -358,7 +422,38 @@ def main():
                         trade_buffer_pct=trade_buffer_pct,
                         daily_rf=daily_rf
                     )
-                )
+
+            elif solver_choice == "Parametric (cvxpy CVaR)":
+                sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
+                    rolling_backtest_monthly_param_cvar(
+                        df_prices=df_sub,
+                        df_instruments=df_instruments,
+                        param_cvar_fn=param_cvar_fn,
+                        start_date=df_sub.index[0],
+                        end_date=df_sub.index[-1],
+                        months_interval=rebal_freq,
+                        window_days=window_days,
+                        transaction_cost_value=transaction_cost_value,
+                        transaction_cost_type=cost_type,
+                        trade_buffer_pct=trade_buffer_pct,
+                        daily_rf=daily_rf
+                    )
+
+            else:  # "Direct (cvxpy CVaR)"
+                sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
+                    rolling_backtest_monthly_direct_cvar(
+                        df_prices=df_sub,
+                        df_instruments=df_instruments,
+                        direct_cvar_fn=direct_cvar_fn,
+                        start_date=df_sub.index[0],
+                        end_date=df_sub.index[-1],
+                        months_interval=rebal_freq,
+                        window_days=window_days,
+                        transaction_cost_value=transaction_cost_value,
+                        transaction_cost_type=cost_type,
+                        trade_buffer_pct=trade_buffer_pct,
+                        daily_rf=daily_rf
+                    )
 
             # Build old line
             old_line = build_old_portfolio_line(df_instruments, df_sub)
@@ -445,6 +540,7 @@ def main():
                 rebal_dates.append(last_day)
 
             st.write("### Interval Performance")
+            from modules.backtesting.rolling_intervals import display_interval_bars_and_stats
             display_interval_bars_and_stats(
                 sr_line_old= old_line_u,
                 sr_line_new= sr_line,
@@ -454,8 +550,8 @@ def main():
                 display_mode="grouped"
             )
 
-            # drawdown
             st.write("### Drawdown Over Time")
+            from modules.backtesting.max_drawdown import plot_drawdown_series, show_max_drawdown_comparison
             df_compare= pd.DataFrame({
                 "Old_Ptf": old_line_u* old0,
                 "New_Ptf": new_line_u* new0
@@ -466,66 +562,68 @@ def main():
             st.write("### Max Drawdown Comparison")
             st.dataframe(df_dd_comp.style.format("{:.2%}"))
 
-            # 12-Month Frontier
-            st.write("### 12-Month Final Frontier")
-            fvol, fret = compute_efficient_frontier_12m(
-                df_prices= df_sub,
-                df_instruments= df_instruments,
-                n_points=50,
-                clamp_min_return=0.0,
-                remove_dominated=True,
-                do_shrink_means=do_shrink_means,
-                alpha=alpha_shrink,
-                do_shrink_cov=do_shrink_cov,
-                beta=beta_shrink,
-                use_ledoitwolf=do_ledoitwolf,
-                do_ewm=do_ewm,
-                ewm_alpha= ewm_alpha,
-                regularize_cov=reg_cov,
-                class_constraints=class_sum_constraints,
-                col_tickers= col_tickers,
-                final_w= final_w
-            )
-            if len(fvol) == 0:
-                st.warning("No feasible 12-month frontier.")
-            else:
-                if len(df_sub) > 252:
-                    df_12m= df_sub.iloc[-252:].copy()
-                else:
-                    df_12m= df_sub.copy()
-                ret_12m= df_12m.pct_change().fillna(0.0)
-                mean_12m= ret_12m.mean().values
-                cov_12m= ret_12m.cov().values
-
-                def daily_vol_ret(w):
-                    vol_ = np.sqrt(w @ cov_12m @ w)
-                    re_  = mean_12m @ w
-                    return vol_, re_
-
-                old_map={}
-                for i, tk in enumerate(col_tickers):
-                    row_= df_instruments[df_instruments["#ID"]==tk]
-                    if not row_.empty:
-                        old_map[i]= row_["Weight_Old"].iloc[0]
-                    else:
-                        old_map[i]= 0.0
-                sum_old= sum(list(old_map.values()))
-                if sum_old<=0:
-                    sum_old=1.0
-                w_old= np.array([old_map[i] for i in range(len(col_tickers))])/ sum_old
-
-                old_vol, old_ret= daily_vol_ret(w_old)
-                new_vol, new_ret= daily_vol_ret(final_w)
-
-                same_v, same_r= interpolate_frontier_for_vol(fvol, fret, old_vol)
-                figf= plot_frontier_comparison(
-                    fvol, fret,
-                    old_vol, old_ret,
-                    new_vol, new_ret,
-                    same_v, same_r,
-                    title= "12-Month Frontier: Old vs New"
+            # 12-Month Frontier (only relevant for variance approach)
+            if solver_choice in ["Parametric (cvxpy)","Direct (cvxpy)"]:
+                st.write("### 12-Month Final Frontier")
+                fvol, fret = compute_efficient_frontier_12m(
+                    df_prices= df_sub,
+                    df_instruments= df_instruments,
+                    n_points=50,
+                    clamp_min_return=0.0,
+                    remove_dominated=True,
+                    do_shrink_means=do_shrink_means,
+                    alpha=alpha_shrink,
+                    do_shrink_cov=do_shrink_cov,
+                    beta=beta_shrink,
+                    use_ledoitwolf=do_ledoitwolf,
+                    do_ewm=do_ewm,
+                    ewm_alpha= ewm_alpha,
+                    regularize_cov= reg_cov,
+                    class_constraints= class_sum_constraints,
+                    col_tickers= col_tickers,
+                    final_w= final_w
                 )
-                st.plotly_chart(figf)
+                if len(fvol)==0:
+                    st.warning("No feasible 12-month frontier.")
+                else:
+                    if len(df_sub)>252:
+                        df_12m= df_sub.iloc[-252:].copy()
+                    else:
+                        df_12m= df_sub.copy()
+                    ret_12m= df_12m.pct_change().fillna(0.0)
+                    mean_12m= ret_12m.mean().values
+                    cov_12m= ret_12m.cov().values
+
+                    def daily_vol_ret(w):
+                        vol_= np.sqrt(w @ cov_12m @ w)
+                        re_ = mean_12m @ w
+                        return vol_, re_
+
+                    old_map={}
+                    for i, tk in enumerate(col_tickers):
+                        row_= df_instruments[df_instruments["#ID"]==tk]
+                        if not row_.empty:
+                            old_map[i]= row_["Weight_Old"].iloc[0]
+                        else:
+                            old_map[i]=0.0
+                    sum_old= sum(list(old_map.values()))
+                    if sum_old<=0:
+                        sum_old=1.0
+                    w_old= np.array([old_map[i] for i in range(len(col_tickers))])/ sum_old
+
+                    old_vol, old_ret= daily_vol_ret(w_old)
+                    new_vol, new_ret= daily_vol_ret(final_w)
+
+                    from modules.optimization.efficient_frontier import interpolate_frontier_for_vol, plot_frontier_comparison
+                    same_v, same_r= interpolate_frontier_for_vol(fvol, fret, old_vol)
+                    figf= plot_frontier_comparison(
+                        fvol, fret,
+                        old_vol, old_ret,
+                        new_vol, new_ret,
+                        same_v, same_r,
+                        title= "12-Month Frontier: Old vs New"
+                    )
+                    st.plotly_chart(figf)
 
     else:
         # "Hyperparameter Optimization" => sub-choice => Grid or Bayesian
@@ -597,5 +695,5 @@ def main():
                 st.dataframe(df_bayes)
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
