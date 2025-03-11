@@ -1,13 +1,14 @@
-# modules/analytics/constraints.py
+# File: modules/analytics/constraints.py
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> dict:
     """
-    Now forcibly use st.sidebar.* so the UI is rendered in the sidebar.
+    We ensure keep_current => class_sum_constraints for each asset class is
+    old_weight ± buffer. This must include the 'Cash' class if #Asset == 'Cash'.
     """
-    # Optionally, remove any top-level st.* calls, replace with st.sidebar
     st.sidebar.markdown("### Constraints Configuration")
 
     earliest = df_prices.index.min()
@@ -29,7 +30,6 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
     user_start = pd.Timestamp(user_start_date)
 
     constraint_mode = st.sidebar.selectbox("Constraint Mode", ["custom", "keep_current"], index=0)
-
     buffer_pct = 0.0
     class_sum_constraints = {}
     subtype_constraints   = {}
@@ -37,6 +37,16 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
     st.sidebar.write(f"Mode: {constraint_mode}")
     have_sec_type = ("#Security_Type" in df_instruments.columns)
     all_classes   = df_instruments["#Asset"].unique()
+
+    # Make sure we compute Weight_Old if needed
+    if "#Quantity" in df_instruments.columns and "#Last_Price" in df_instruments.columns:
+        df_instruments["Value"] = df_instruments["#Quantity"] * df_instruments["#Last_Price"]
+        tot_val = df_instruments["Value"].sum()
+        if tot_val<=0:
+            tot_val=1.0
+        df_instruments["Weight_Old"] = df_instruments["Value"]/ tot_val
+    else:
+        df_instruments["Weight_Old"] = 0.0
 
     if constraint_mode == "custom":
         st.sidebar.info("Custom: specify class-level min/max + subtype constraints.")
@@ -72,8 +82,18 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
         st.sidebar.info("Keep Current: class weights = old +/- buffer. Subtype optional.")
         buff_in = st.sidebar.number_input("Buffer (%) around old class weight", 0.0, 100.0, 5.0, step=1.0)
         buffer_pct = buff_in/100.0
+
+        class_old_w = df_instruments.groupby("#Asset")["Weight_Old"].sum()
         for cl in all_classes:
+            oldw = class_old_w.get(cl, 0.0)
+            mn = max(0.0, oldw - buffer_pct)
+            mx = min(1.0, oldw + buffer_pct)
+            class_sum_constraints[cl] = {
+                "min_class_weight": mn,
+                "max_class_weight": mx
+            }
             with st.sidebar.expander(f"Asset Class: {cl} (keep_current)", expanded=False):
+                st.write(f"Old weight = {oldw*100:.2f}%, buffer = ±{buffer_pct*100:.2f}% => range = [{mn*100:.2f}..{mx*100:.2f}]%")
                 if have_sec_type:
                     df_cl = df_instruments[df_instruments["#Asset"]==cl]
                     st.markdown("**Security-Type Constraints**")
