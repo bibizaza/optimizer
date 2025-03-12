@@ -10,6 +10,9 @@ from dateutil.relativedelta import relativedelta
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
+# --- Import our custom excel_loader ---
+from modules.data_loading.excel_loader import parse_excel
+
 # Constraints => keep_current or custom
 from modules.analytics.constraints import get_main_constraints
 
@@ -52,26 +55,9 @@ from modules.analytics.weight_display import (
 )
 from modules.analytics.extended_metrics import compute_extended_metrics
 
-
-##########################################################################
-# parse_excel helper
-##########################################################################
-def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
-    df_instruments = pd.read_excel(file, sheet_name=streamlit_sheet, header=0)
-    df_prices_raw = pd.read_excel(file, sheet_name=histo_sheet, header=0)
-    if df_prices_raw.columns[0] != "Date":
-        df_prices_raw.rename(columns={df_prices_raw.columns[0]: "Date"}, inplace=True)
-    df_prices_raw["Date"] = pd.to_datetime(df_prices_raw["Date"], errors="coerce")
-    df_prices_raw.dropna(subset=["Date"], inplace=True)
-    df_prices_raw.set_index("Date", inplace=True)
-    df_prices_raw.sort_index(inplace=True)
-    df_prices_raw = df_prices_raw.apply(pd.to_numeric, errors="coerce")
-    return df_instruments, df_prices_raw
-
-
-##########################################################################
-# data & constraints => from constraints.py
-##########################################################################
+###############################################################################
+# Data & constraints from sidebar
+###############################################################################
 def sidebar_data_and_constraints():
     st.sidebar.title("Data Loading")
     approach_data = st.sidebar.radio(
@@ -85,121 +71,125 @@ def sidebar_data_and_constraints():
     coverage = 0.8
     main_constr = {}
 
-    if approach_data=="One-time Convert Excel->Parquet":
-        st.sidebar.info("Excel->Parquet converter not shown.")
+    if approach_data == "One-time Convert Excel->Parquet":
+        st.sidebar.info("Excel->Parquet converter not shown here.")
+        # Typically you'd implement that logic or skip
         return df_instruments, df_prices, coverage, main_constr
-    elif approach_data=="Use Excel for Analysis":
-        excel_file= st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
+
+    elif approach_data == "Use Excel for Analysis":
+        excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
         if excel_file:
-            df_instruments, df_prices= parse_excel(excel_file)
+            # Use parse_excel from modules.data_loading.excel_loader
+            df_instruments, df_prices = parse_excel(excel_file)
             if not df_prices.empty:
-                coverage= st.sidebar.slider("Min coverage fraction", 0.0,1.0,0.8,0.05)
+                coverage = st.sidebar.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
                 st.sidebar.markdown("---")
                 st.sidebar.subheader("Constraints & Costs")
-                main_constr= get_main_constraints(df_instruments, df_prices)
+                main_constr = get_main_constraints(df_instruments, df_prices)
             else:
                 st.sidebar.warning("No valid data in Excel.")
     else:
+        # "Use Parquet for Analysis"
         st.sidebar.info("Upload instruments.parquet & prices.parquet")
-        fi= st.sidebar.file_uploader("Upload instruments.parquet", type=["parquet"])
-        fp= st.sidebar.file_uploader("Upload prices.parquet", type=["parquet"])
+        fi = st.sidebar.file_uploader("Upload instruments.parquet", type=["parquet"])
+        fp = st.sidebar.file_uploader("Upload prices.parquet", type=["parquet"])
         if fi and fp:
-            df_instruments= pd.read_parquet(fi)
-            df_prices= pd.read_parquet(fp)
+            df_instruments = pd.read_parquet(fi)
+            df_prices = pd.read_parquet(fp)
             if not df_prices.empty:
-                coverage= st.sidebar.slider("Min coverage fraction", 0.0,1.0,0.8,0.05)
+                coverage = st.sidebar.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
                 st.sidebar.markdown("---")
                 st.sidebar.subheader("Constraints & Costs")
-                main_constr= get_main_constraints(df_instruments, df_prices)
+                main_constr = get_main_constraints(df_instruments, df_prices)
             else:
                 st.sidebar.warning("No valid data in Parquet files.")
 
     return df_instruments, df_prices, coverage, main_constr
 
 
-##########################################################################
-# Clean coverage & old portfolio
-##########################################################################
-def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8)-> pd.DataFrame:
-    df_prices= df_prices.copy()
-    coverage= df_prices.notna().sum(axis=1)
-    n_cols= df_prices.shape[1]
-    threshold= n_cols* min_coverage
-    df_prices= df_prices[coverage>= threshold]
-    df_prices= df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
+###############################################################################
+# Coverage cleaning & old portfolio line
+###############################################################################
+def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
+    df_prices = df_prices.copy()
+    coverage = df_prices.notna().sum(axis=1)
+    n_cols = df_prices.shape[1]
+    threshold = n_cols * min_coverage
+    df_prices = df_prices[coverage >= threshold]
+    df_prices = df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
     return df_prices
 
-def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame)-> pd.Series:
-    df_prices= df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
-    ticker_qty= {}
+def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> pd.Series:
+    df_prices = df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
+    ticker_qty = {}
     for _, row in df_instruments.iterrows():
-        tkr= row["#ID"]
-        qty= row["#Quantity"]
-        ticker_qty[tkr]= qty
-    col_list= df_prices.columns
-    old_shares= np.array([ticker_qty.get(c,0.0) for c in col_list])
-    vals= [np.sum(old_shares* row.values) for _, row in df_prices.iterrows()]
-    sr= pd.Series(vals, index=df_prices.index)
-    if len(sr)>0 and sr.iloc[0]<=0:
-        sr.iloc[0]=1.0
-    if len(sr)>0:
-        sr= sr/ sr.iloc[0]
-    sr.name= "Old_Ptf"
+        tkr = row["#ID"]
+        qty = row["#Quantity"]
+        ticker_qty[tkr] = qty
+    col_list = df_prices.columns
+    old_shares = np.array([ticker_qty.get(c, 0.0) for c in col_list])
+    vals = [np.sum(old_shares * row.values) for _, row in df_prices.iterrows()]
+    sr = pd.Series(vals, index=df_prices.index)
+    if len(sr) > 0 and sr.iloc[0] <= 0:
+        sr.iloc[0] = 1.0
+    if len(sr) > 0:
+        sr = sr / sr.iloc[0]
+    sr.name = "Old_Ptf"
     return sr
 
 
-##########################################################################
-# main app
-##########################################################################
+###############################################################################
+# Main app
+###############################################################################
 def main():
-    st.title("Optimize Your Portfolio (Markowitz & CVaR) - with CVaR freq choice")
+    st.title("Optimize Your Portfolio (Markowitz & CVaR)")
 
     # 1) Data + constraints
-    df_instruments, df_prices, coverage, main_constr= sidebar_data_and_constraints()
+    df_instruments, df_prices, coverage, main_constr = sidebar_data_and_constraints()
     if df_instruments.empty or df_prices.empty or not main_constr:
         st.stop()
 
     # 2) Clean data
-    df_prices_clean= clean_df_prices(df_prices, coverage)
-    nan_cols= [c for c in df_prices_clean.columns if df_prices_clean[c].isna().all()]
+    df_prices_clean = clean_df_prices(df_prices, coverage)
+    nan_cols = [c for c in df_prices_clean.columns if df_prices_clean[c].isna().all()]
     if nan_cols:
         st.write("DEBUG => dropping columns fully NaN =>", nan_cols)
-        df_prices_clean.drop(columns= nan_cols, inplace=True)
+        df_prices_clean.drop(columns=nan_cols, inplace=True)
+
     df_prices_clean.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_prices_clean.fillna(method="ffill", inplace=True)
     df_prices_clean.fillna(method="bfill", inplace=True)
 
-    # 3) Build old portfolio
-    # typically you do:
+    # 3) Build old portfolio weighting if columns exist
     if "#Quantity" in df_instruments.columns and "#Last_Price" in df_instruments.columns:
         df_instruments["Value"] = df_instruments["#Quantity"] * df_instruments["#Last_Price"]
         tot_val = df_instruments["Value"].sum()
-        if tot_val<=0:
-            tot_val=1.0
-        df_instruments["Weight_Old"] = df_instruments["Value"]/ tot_val
+        if tot_val <= 0:
+            tot_val = 1.0
+        df_instruments["Weight_Old"] = df_instruments["Value"] / tot_val
     else:
         df_instruments["Weight_Old"] = 0.0
 
-    # subset from user_start
-    user_start= main_constr["user_start"]
-    df_sub= df_prices_clean.loc[pd.Timestamp(user_start):]
-    if len(df_sub)<2:
+    # Subset from user_start
+    user_start = main_constr["user_start"]
+    df_sub = df_prices_clean.loc[pd.Timestamp(user_start):]
+    if len(df_sub) < 2:
         st.error("Not enough data after your chosen start date.")
         st.stop()
 
-    # column tickers => #Asset => we build arrays
-    col_tickers= df_sub.columns.tolist()
-    have_sec= ("#Security_Type" in df_instruments.columns)
-    asset_cls_list= []
-    sec_type_list= []
+    # Build arrays
+    col_tickers = df_sub.columns.tolist()
+    have_sec = ("#Security_Type" in df_instruments.columns)
+    asset_cls_list = []
+    sec_type_list = []
     for tk in col_tickers:
-        row_= df_instruments[df_instruments["#ID"]== tk]
+        row_ = df_instruments[df_instruments["#ID"] == tk]
         if not row_.empty:
             asset_cls_list.append(row_["#Asset"].iloc[0])
             if have_sec:
-                stp= row_["#Security_Type"].iloc[0]
+                stp = row_["#Security_Type"].iloc[0]
                 if pd.isna(stp):
-                    stp= "Unknown"
+                    stp = "Unknown"
                 sec_type_list.append(stp)
             else:
                 sec_type_list.append("Unknown")
@@ -207,70 +197,72 @@ def main():
             asset_cls_list.append("Unknown")
             sec_type_list.append("Unknown")
 
-    # extract constraints
-    constraint_mode= main_constr["constraint_mode"]
-    buffer_pct= main_constr["buffer_pct"]
-    class_sum_constraints= main_constr["class_sum_constraints"]
-    subtype_constraints= main_constr["subtype_constraints"]
-    daily_rf= main_constr["daily_rf"]
-    cost_type= main_constr["cost_type"]
-    transaction_cost_value= main_constr["transaction_cost_value"]
-    trade_buffer_pct= main_constr["trade_buffer_pct"]
+    # Extract constraints
+    constraint_mode = main_constr["constraint_mode"]
+    buffer_pct = main_constr["buffer_pct"]
+    class_sum_constraints = main_constr["class_sum_constraints"]
+    subtype_constraints = main_constr["subtype_constraints"]
+    daily_rf = main_constr["daily_rf"]
+    cost_type = main_constr["cost_type"]
+    transaction_cost_value = main_constr["transaction_cost_value"]
+    trade_buffer_pct = main_constr["trade_buffer_pct"]
 
-    # build old line
-    old_line= build_old_portfolio_line(df_instruments, df_sub)
+    # Build old line
+    old_line = build_old_portfolio_line(df_instruments, df_sub)
 
-    # top-level => portfolio optimization or hyperparam
-    top_choice= st.radio("Analysis Type:", ["Portfolio Optimization","Hyperparameter Optimization"], index=0)
+    # 4) Let user pick solver => Markowitz or CVaR
+    top_choice = st.radio("Analysis Type:", ["Portfolio Optimization","Hyperparameter Optimization"], index=0)
 
-    if top_choice=="Portfolio Optimization":
-        # user picks approach
-        solver_choice= st.selectbox("Solver Approach:", [
-            "Parametric (Markowitz)",
-            "Direct (Markowitz)",
-            "Parametric (CVaR)",
-            "Direct (CVaR)"
-        ], index=0)
+    if top_choice == "Portfolio Optimization":
+        solver_choice = st.selectbox(
+            "Solver Approach:",
+            [
+                "Parametric (Markowitz)",
+                "Direct (Markowitz)",
+                "Parametric (CVaR)",
+                "Direct (CVaR)"
+            ],
+            index=0
+        )
 
         with st.expander("Rolling Parameters", expanded=False):
-            rebal_freq= st.selectbox("Rebalance Frequency (months)", [1,3,6], index=0)
-            lookback_m= st.selectbox("Lookback Window (months)", [3,6,12], index=0)
-            window_days= lookback_m* 21
+            rebal_freq = st.selectbox("Rebalance Frequency (months)", [1,3,6], index=0)
+            lookback_m = st.selectbox("Lookback Window (months)", [3,6,12], index=0)
+            window_days = lookback_m*21
 
+            # If Markowitz => show shrink inputs
             if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
-                # Markowitz shrinks
-                reg_cov= st.checkbox("Regularize Cov?", False)
-                do_ledoitwolf= st.checkbox("Use LedoitWolf Cov?", False)
-                do_ewm= st.checkbox("Use EWM Cov?", False)
-                ewm_alpha= st.slider("EWM alpha", 0.0,1.0,0.06,0.01)
+                reg_cov = st.checkbox("Regularize Cov?", False)
+                do_ledoitwolf = st.checkbox("Use LedoitWolf Cov?", False)
+                do_ewm = st.checkbox("Use EWM Cov?", False)
+                ewm_alpha = st.slider("EWM alpha", 0.0,1.0,0.06,0.01)
 
                 st.write("**Mean & Cov Shrink**")
-                do_shrink_means= st.checkbox("Shrink Means?", True)
-                alpha_shrink= st.slider("Alpha (for means)",0.0,1.0,0.3,0.01)
-                do_shrink_cov= st.checkbox("Shrink Cov (diagonal)?", True)
-                beta_shrink= st.slider("Beta (for cov)",0.0,1.0,0.2,0.01)
+                do_shrink_means = st.checkbox("Shrink Means?", True)
+                alpha_shrink = st.slider("Alpha (for means)", 0.0,1.0,0.3,0.01)
+                do_shrink_cov = st.checkbox("Shrink Cov (diagonal)?", True)
+                beta_shrink = st.slider("Beta (for cov)", 0.0,1.0,0.2,0.01)
 
-                if solver_choice=="Parametric (Markowitz)":
-                    n_points_man= st.number_input("Frontier #points (Param Only)",5,100,15, step=5)
+                if solver_choice == "Parametric (Markowitz)":
+                    n_points_man = st.number_input("Frontier #points (Param Only)", 5,100,15, step=5)
                 else:
-                    n_points_man= 0
+                    n_points_man = 0
 
-                cvar_alpha_in= 0.95
-                cvar_limit_in= 0.10
+                cvar_alpha_in = 0.95
+                cvar_limit_in = 0.10
                 cvar_freq_user= "daily"
             else:
-                # CVaR => param or direct
+                # CVaR => param or direct => no Markowitz shrinks
                 reg_cov=False; do_ledoitwolf=False; do_ewm=False; ewm_alpha=0.0
                 do_shrink_means=False; alpha_shrink=0.0
                 do_shrink_cov=False; beta_shrink=0.0
-                n_points_man= 0
+                n_points_man=0
 
-                # user selects CVaR alpha, limit (direct), and freq
                 cvar_alpha_in= st.slider("CVaR alpha", 0.0,0.9999,0.95,0.01)
                 cvar_limit_in= st.slider("CVaR limit (Direct approach)", 0.0,1.0,0.10,0.01)
                 cvar_freq_user= st.selectbox("CVaR Frequency", ["daily","weekly","monthly","annual"], index=0)
 
-            run_button= st.button("Run Rolling")
+            run_button = st.button("Run Rolling")
 
         if not run_button:
             st.stop()
@@ -321,7 +313,6 @@ def main():
 
         # define param/direct CVaR
         def param_cvar_fn(sub_ret: pd.DataFrame, old_w: np.ndarray):
-            # param CVaR => dynamic approach
             w_opt, summary= dynamic_min_cvar_with_fallback(
                 df_returns= sub_ret,
                 tickers= col_tickers,
@@ -333,7 +324,7 @@ def main():
                 cvar_alpha= cvar_alpha_in,
                 no_short=True,
                 daily_rf= daily_rf,
-                freq_choice= cvar_freq_user,  # user-chosen freq
+                freq_choice= cvar_freq_user,
                 clamp_factor= 1.5,
                 max_weight_each= 1.0,
                 max_iter=10
@@ -356,16 +347,9 @@ def main():
             )
             return w_opt, summary
 
-        # choose rolling function
-        from modules.backtesting.rolling_monthly import (
-            rolling_backtest_monthly_param_sharpe,
-            rolling_backtest_monthly_direct_sharpe,
-            rolling_backtest_monthly_param_cvar,
-            rolling_backtest_monthly_direct_cvar
-        )
-
+        # pick rolling function
         if solver_choice=="Parametric (Markowitz)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                 rolling_backtest_monthly_param_sharpe(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -379,9 +363,8 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
-            )
         elif solver_choice=="Direct (Markowitz)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                 rolling_backtest_monthly_direct_sharpe(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -395,9 +378,8 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
-            )
         elif solver_choice=="Parametric (CVaR)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                 rolling_backtest_monthly_param_cvar(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -411,10 +393,9 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
-            )
         else:
             # "Direct (CVaR)"
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                 rolling_backtest_monthly_direct_cvar(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -428,23 +409,18 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
-            )
 
-        # build old line => to compare
-        old_line= build_old_portfolio_line(df_instruments, df_sub)
-        idx_all= old_line.index.union(sr_line.index)
-        old_line_u= old_line.reindex(idx_all, method="ffill")
-        new_line_u= sr_line.reindex(idx_all, method="ffill")
-        old0= old_line_u.iloc[0]
-        new0= new_line_u.iloc[0]
-
-        df_cum= pd.DataFrame({
+        # Build old line => compare
+        old_line_u = old_line.reindex(sr_line.index, method="ffill")
+        old0 = old_line_u.iloc[0]
+        new0 = sr_line.iloc[0]
+        df_cum = pd.DataFrame({
             "Old(%)": (old_line_u/old0 -1)*100,
-            "New(%)": (new_line_u/new0 -1)*100
-        }, index= idx_all)
+            "New(%)": (sr_line/new0 -1)*100
+        }, index= sr_line.index)
         st.line_chart(df_cum)
 
-        # extended metrics
+        # Extended metrics
         ext_metrics_old= compute_extended_metrics(old_line_u, daily_rf=daily_rf)
         performance_keys= ["Total Return","Annual Return","Annual Vol","Sharpe"]
         risk_keys= ["MaxDD","TimeToRecovery","VaR_1M99","CVaR_1M99"]
@@ -455,7 +431,7 @@ def main():
             for mk in metric_keys:
                 val_old= old_m.get(mk,0.0)
                 val_new= new_m.get(mk,0.0)
-                rows.append((mk,val_old,val_new))
+                rows.append((mk, val_old, val_new))
             df_out= pd.DataFrame(rows, columns=["Metric","Old","New"])
             df_out.set_index("Metric", inplace=True)
             return df_out
@@ -529,7 +505,7 @@ def main():
         from modules.backtesting.max_drawdown import plot_drawdown_series, show_max_drawdown_comparison
         df_compare= pd.DataFrame({
             "Old_Ptf": old_line_u* old0,
-            "New_Ptf": new_line_u* new0
+            "New_Ptf": sr_line* new0
         }, index= old_line_u.index).dropna()
         fig_dd= plot_drawdown_series(df_compare)
         st.plotly_chart(fig_dd)
@@ -540,11 +516,6 @@ def main():
         # if Markowitz => 12-month frontier
         if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
             st.write("### 12-Month Final Frontier")
-            from modules.optimization.efficient_frontier import (
-                compute_efficient_frontier_12m,
-                interpolate_frontier_for_vol,
-                plot_frontier_comparison
-            )
             fvol, fret= compute_efficient_frontier_12m(
                 df_prices= df_sub,
                 df_instruments= df_instruments,
@@ -594,6 +565,9 @@ def main():
                 old_vol, old_ret= daily_vol_ret(w_old)
                 new_vol, new_ret= daily_vol_ret(final_w)
 
+                from modules.optimization.efficient_frontier import (
+                    interpolate_frontier_for_vol, plot_frontier_comparison
+                )
                 same_v, same_r= interpolate_frontier_for_vol(fvol, fret, old_vol)
                 figf= plot_frontier_comparison(
                     fvol, fret,
