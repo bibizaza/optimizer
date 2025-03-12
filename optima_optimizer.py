@@ -10,7 +10,7 @@ from dateutil.relativedelta import relativedelta
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
-# --- Import our custom excel_loader ---
+# Import parse_excel from your custom excel_loader
 from modules.data_loading.excel_loader import parse_excel
 
 # Constraints => keep_current or custom
@@ -55,6 +55,10 @@ from modules.analytics.weight_display import (
 )
 from modules.analytics.extended_metrics import compute_extended_metrics
 
+# NEW => Import the new "display_extended_metrics" function
+from modules.analytics.display_utils import display_extended_metrics
+
+
 ###############################################################################
 # Data & constraints from sidebar
 ###############################################################################
@@ -73,13 +77,11 @@ def sidebar_data_and_constraints():
 
     if approach_data == "One-time Convert Excel->Parquet":
         st.sidebar.info("Excel->Parquet converter not shown here.")
-        # Typically you'd implement that logic or skip
         return df_instruments, df_prices, coverage, main_constr
 
     elif approach_data == "Use Excel for Analysis":
         excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
         if excel_file:
-            # Use parse_excel from modules.data_loading.excel_loader
             df_instruments, df_prices = parse_excel(excel_file)
             if not df_prices.empty:
                 coverage = st.sidebar.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
@@ -89,7 +91,6 @@ def sidebar_data_and_constraints():
             else:
                 st.sidebar.warning("No valid data in Excel.")
     else:
-        # "Use Parquet for Analysis"
         st.sidebar.info("Upload instruments.parquet & prices.parquet")
         fi = st.sidebar.file_uploader("Upload instruments.parquet", type=["parquet"])
         fp = st.sidebar.file_uploader("Upload prices.parquet", type=["parquet"])
@@ -230,7 +231,6 @@ def main():
             lookback_m = st.selectbox("Lookback Window (months)", [3,6,12], index=0)
             window_days = lookback_m*21
 
-            # If Markowitz => show shrink inputs
             if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
                 reg_cov = st.checkbox("Regularize Cov?", False)
                 do_ledoitwolf = st.checkbox("Use LedoitWolf Cov?", False)
@@ -349,7 +349,7 @@ def main():
 
         # pick rolling function
         if solver_choice=="Parametric (Markowitz)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
                 rolling_backtest_monthly_param_sharpe(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -363,8 +363,9 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
+            )
         elif solver_choice=="Direct (Markowitz)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
                 rolling_backtest_monthly_direct_sharpe(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -378,8 +379,9 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
+            )
         elif solver_choice=="Parametric (CVaR)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
                 rolling_backtest_monthly_param_cvar(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -393,9 +395,10 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
+            )
         else:
             # "Direct (CVaR)"
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
                 rolling_backtest_monthly_direct_cvar(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -409,6 +412,7 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
+            )
 
         # Build old line => compare
         old_line_u = old_line.reindex(sr_line.index, method="ffill")
@@ -421,48 +425,15 @@ def main():
         st.line_chart(df_cum)
 
         # Extended metrics
+        from modules.analytics.extended_metrics import compute_extended_metrics
         ext_metrics_old= compute_extended_metrics(old_line_u, daily_rf=daily_rf)
-        performance_keys= ["Total Return","Annual Return","Annual Vol","Sharpe"]
-        risk_keys= ["MaxDD","TimeToRecovery","VaR_1M99","CVaR_1M99"]
-        ratio_keys= ["Skew","Kurtosis","Sortino","Calmar","Omega"]
 
-        def build_metric_df(metric_keys, old_m, new_m):
-            rows= []
-            for mk in metric_keys:
-                val_old= old_m.get(mk,0.0)
-                val_new= new_m.get(mk,0.0)
-                rows.append((mk, val_old, val_new))
-            df_out= pd.DataFrame(rows, columns=["Metric","Old","New"])
-            df_out.set_index("Metric", inplace=True)
-            return df_out
+        # *** Use the newly imported function from display_utils ***
+        from modules.analytics.display_utils import display_extended_metrics
+        st.write("## Extended Metrics Comparison")
+        display_extended_metrics(ext_metrics_old, ext_metrics_new)
 
-        df_perf_table= build_metric_df(performance_keys, ext_metrics_old, ext_metrics_new)
-        df_risk_table= build_metric_df(risk_keys,        ext_metrics_old, ext_metrics_new)
-        df_ratio_table= build_metric_df(ratio_keys,      ext_metrics_old, ext_metrics_new)
-
-        def format_ext(df_):
-            def format_val(mk,val):
-                pct_metrics= ["Total Return","Annual Return","Annual Vol","MaxDD","VaR_1M99","CVaR_1M99"]
-                if mk in pct_metrics:
-                    return f"{val*100:.2f}%"
-                elif mk=="TimeToRecovery":
-                    return f"{val:.0f}"
-                else:
-                    return f"{val:.3f}"
-            dfx= df_.copy()
-            for mk in dfx.index:
-                for colx in ["Old","New"]:
-                    rawv= dfx.loc[mk,colx]
-                    dfx.loc[mk,colx]= format_val(mk,rawv)
-            return dfx
-
-        st.write("### Extended Metrics - Performance")
-        st.dataframe(format_ext(df_perf_table))
-        st.write("### Extended Metrics - Risk")
-        st.dataframe(format_ext(df_risk_table))
-        st.write("### Extended Metrics - Ratios")
-        st.dataframe(format_ext(df_ratio_table))
-
+        # Show weight diffs
         from modules.analytics.weight_display import display_instrument_weight_diff, display_class_weight_diff
         display_instrument_weight_diff(df_instruments, col_tickers, final_w)
         display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
@@ -516,6 +487,11 @@ def main():
         # if Markowitz => 12-month frontier
         if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
             st.write("### 12-Month Final Frontier")
+            from modules.optimization.efficient_frontier import (
+                compute_efficient_frontier_12m,
+                interpolate_frontier_for_vol,
+                plot_frontier_comparison
+            )
             fvol, fret= compute_efficient_frontier_12m(
                 df_prices= df_sub,
                 df_instruments= df_instruments,
@@ -592,7 +568,8 @@ def main():
             use_direct_gs= st.checkbox("Use Direct Solver in Grid Search?", value=False)
 
             if st.button("Run Grid Search"):
-                if not frontier_points_list or not alpha_list or not beta_list or not rebal_freq_list or not lookback_list:
+                if not frontier_points_list or not alpha_list or not beta_list \
+                   or not rebal_freq_list or not lookback_list:
                     st.error("Select at least one param in each list.")
                 else:
                     df_gs= rolling_grid_search(
@@ -624,7 +601,7 @@ def main():
                     )
                     st.dataframe(df_gs)
                     if "Sharpe Ratio" in df_gs.columns:
-                        best_= df_gs.sort_values("Sharpe Ratio", ascending=False).head(5)
+                        best_ = df_gs.sort_values("Sharpe Ratio", ascending=False).head(5)
                         st.write("**Top 5 combos by Sharpe**")
                         st.dataframe(best_)
         else:
@@ -645,6 +622,7 @@ def main():
             if not df_bayes.empty:
                 st.write("Bayesian Search Results:")
                 st.dataframe(df_bayes)
+
 
 if __name__=="__main__":
     main()
