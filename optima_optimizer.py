@@ -10,7 +10,7 @@ from dateutil.relativedelta import relativedelta
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
-# Import parse_excel from your custom excel_loader
+# --- Import our custom excel_loader ---
 from modules.data_loading.excel_loader import parse_excel
 
 # Constraints => keep_current or custom
@@ -55,7 +55,7 @@ from modules.analytics.weight_display import (
 )
 from modules.analytics.extended_metrics import compute_extended_metrics
 
-# NEW => Import the new "display_extended_metrics" function
+# NEW => Import the new "display_extended_metrics" function from display_utils
 from modules.analytics.display_utils import display_extended_metrics
 
 
@@ -425,16 +425,13 @@ def main():
         st.line_chart(df_cum)
 
         # Extended metrics
-        from modules.analytics.extended_metrics import compute_extended_metrics
         ext_metrics_old= compute_extended_metrics(old_line_u, daily_rf=daily_rf)
 
         # *** Use the newly imported function from display_utils ***
-        from modules.analytics.display_utils import display_extended_metrics
         st.write("## Extended Metrics Comparison")
         display_extended_metrics(ext_metrics_old, ext_metrics_new)
 
         # Show weight diffs
-        from modules.analytics.weight_display import display_instrument_weight_diff, display_class_weight_diff
         display_instrument_weight_diff(df_instruments, col_tickers, final_w)
         display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
@@ -462,7 +459,6 @@ def main():
             rebal_dates.append(last_day)
 
         st.write("### Interval Performance")
-        from modules.backtesting.rolling_intervals import display_interval_bars_and_stats
         display_interval_bars_and_stats(
             sr_line_old= old_line_u,
             sr_line_new= sr_line,
@@ -473,7 +469,6 @@ def main():
         )
 
         st.write("### Drawdown Over Time")
-        from modules.backtesting.max_drawdown import plot_drawdown_series, show_max_drawdown_comparison
         df_compare= pd.DataFrame({
             "Old_Ptf": old_line_u* old0,
             "New_Ptf": sr_line* new0
@@ -487,11 +482,6 @@ def main():
         # if Markowitz => 12-month frontier
         if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
             st.write("### 12-Month Final Frontier")
-            from modules.optimization.efficient_frontier import (
-                compute_efficient_frontier_12m,
-                interpolate_frontier_for_vol,
-                plot_frontier_comparison
-            )
             fvol, fret= compute_efficient_frontier_12m(
                 df_prices= df_sub,
                 df_instruments= df_instruments,
@@ -541,9 +531,6 @@ def main():
                 old_vol, old_ret= daily_vol_ret(w_old)
                 new_vol, new_ret= daily_vol_ret(final_w)
 
-                from modules.optimization.efficient_frontier import (
-                    interpolate_frontier_for_vol, plot_frontier_comparison
-                )
                 same_v, same_r= interpolate_frontier_for_vol(fvol, fret, old_vol)
                 figf= plot_frontier_comparison(
                     fvol, fret,
