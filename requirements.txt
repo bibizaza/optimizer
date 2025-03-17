@@ -1,0 +1,10 @@
+streamlit
+pandas
+openpyxl
+numpy
+python-dateutil
+scikit-optimize
+cvxpy
+plotly
+scikit-learn
+networkx
