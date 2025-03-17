@@ -17,7 +17,7 @@ def display_instrument_weight_diff(
       - df_instruments must have:
          "#ID" => the ticker
          "#Name" => the instrument name
-         "#Asset" => the asset class
+         "#Asset_Class" => the asset class
          "Weight_Old" => the old weight
       - col_tickers => list of tickers in the same order as new_w
       - new_w => shape=(len(col_tickers),) the new final weights
@@ -29,12 +29,12 @@ def display_instrument_weight_diff(
     asset_map= {}
 
     for _, row_ in df_instruments.iterrows():
-        tkr= row_["#ID"]
+        tkr= row_["#Ticker"]
         old_weight_map[tkr]= row_["Weight_Old"]
         # if your sheet has "#Name" => store it
         name_map[tkr] = row_.get("#Name","")
         # if your sheet has "#Asset" => store it
-        asset_map[tkr] = row_.get("#Asset","Unknown")
+        asset_map[tkr] = row_.get("#Asset_Class","Unknown")
 
     # 2) Build a table (DataFrame) row by row
     rows= []
@@ -93,7 +93,7 @@ def display_class_weight_diff(
 
     old_weight_map= {}
     for _, row_ in df_instruments.iterrows():
-        tkr= row_["#ID"]
+        tkr= row_["#Ticker"]
         old_weight_map[tkr]= row_["Weight_Old"]
 
     sum_old= defaultdict(float)
