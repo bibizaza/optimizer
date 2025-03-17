@@ -191,7 +191,7 @@ def main():
     for tk in col_tickers:
         row_= df_instruments[df_instruments["#ID"]== tk]
         if not row_.empty:
-            asset_cls_list.append(row_["#Asset"].iloc[0])
+            asset_cls_list.append(row_["#Asset_Class"].iloc[0])
             if have_sec:
                 stp= row_["#Security_Type"].iloc[0]
                 if pd.isna(stp):
