@@ -13,12 +13,13 @@ from skopt.space import Integer, Real, Categorical
 # Constraints => keep_current or custom
 from modules.analytics.constraints import get_main_constraints
 
-# Rolling monthly logic => 4 approaches
+# Rolling monthly logic => 4 approaches + cost_impact + naive
 from modules.backtesting.rolling_monthly import (
     rolling_backtest_monthly_param_sharpe,
     rolling_backtest_monthly_direct_sharpe,
     rolling_backtest_monthly_param_cvar,
     rolling_backtest_monthly_direct_cvar,
+    rolling_backtest_monthly_naive,          # <-- import the naive approach
     compute_cost_impact,
     rolling_grid_search
 )
@@ -52,10 +53,9 @@ from modules.analytics.weight_display import (
 )
 from modules.analytics.extended_metrics import compute_extended_metrics
 
-
-##########################################################################
+###############################################################################
 # parse_excel helper
-##########################################################################
+###############################################################################
 def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_instruments = pd.read_excel(file, sheet_name=streamlit_sheet, header=0)
     df_prices_raw = pd.read_excel(file, sheet_name=histo_sheet, header=0)
@@ -68,10 +68,9 @@ def parse_excel(file, streamlit_sheet="streamlit", histo_sheet="Histo_Price"):
     df_prices_raw = df_prices_raw.apply(pd.to_numeric, errors="coerce")
     return df_instruments, df_prices_raw
 
-
-##########################################################################
+###############################################################################
 # data & constraints => from constraints.py
-##########################################################################
+###############################################################################
 def sidebar_data_and_constraints():
     st.sidebar.title("Data Loading")
     approach_data = st.sidebar.radio(
@@ -116,10 +115,9 @@ def sidebar_data_and_constraints():
 
     return df_instruments, df_prices, coverage, main_constr
 
-
-##########################################################################
+###############################################################################
 # Clean coverage & old portfolio
-##########################################################################
+###############################################################################
 def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8)-> pd.DataFrame:
     df_prices= df_prices.copy()
     coverage= df_prices.notna().sum(axis=1)
@@ -147,12 +145,11 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
     sr.name= "Old_Ptf"
     return sr
 
-
-##########################################################################
+###############################################################################
 # main app
-##########################################################################
+###############################################################################
 def main():
-    st.title("Optimize Your Portfolio (Markowitz & CVaR) - with CVaR freq choice")
+    st.title("Optimize Your Portfolio (Markowitz & CVaR)")
 
     # 1) Data + constraints
     df_instruments, df_prices, coverage, main_constr= sidebar_data_and_constraints()
@@ -169,25 +166,24 @@ def main():
     df_prices_clean.fillna(method="ffill", inplace=True)
     df_prices_clean.fillna(method="bfill", inplace=True)
 
-    # 3) Build old portfolio
-    # typically you do:
+    # 3) Build old portfolio weighting if columns exist
     if "#Quantity" in df_instruments.columns and "#Last_Price" in df_instruments.columns:
         df_instruments["Value"] = df_instruments["#Quantity"] * df_instruments["#Last_Price"]
         tot_val = df_instruments["Value"].sum()
-        if tot_val<=0:
-            tot_val=1.0
-        df_instruments["Weight_Old"] = df_instruments["Value"]/ tot_val
+        if tot_val <= 0:
+            tot_val = 1.0
+        df_instruments["Weight_Old"] = df_instruments["Value"] / tot_val
     else:
         df_instruments["Weight_Old"] = 0.0
 
-    # subset from user_start
+    # Subset from user_start
     user_start= main_constr["user_start"]
     df_sub= df_prices_clean.loc[pd.Timestamp(user_start):]
     if len(df_sub)<2:
         st.error("Not enough data after your chosen start date.")
         st.stop()
 
-    # column tickers => #Asset => we build arrays
+    # Build arrays for constraints
     col_tickers= df_sub.columns.tolist()
     have_sec= ("#Security_Type" in df_instruments.columns)
     asset_cls_list= []
@@ -207,7 +203,7 @@ def main():
             asset_cls_list.append("Unknown")
             sec_type_list.append("Unknown")
 
-    # extract constraints
+    # constraints
     constraint_mode= main_constr["constraint_mode"]
     buffer_pct= main_constr["buffer_pct"]
     class_sum_constraints= main_constr["class_sum_constraints"]
@@ -220,17 +216,20 @@ def main():
     # build old line
     old_line= build_old_portfolio_line(df_instruments, df_sub)
 
-    # top-level => portfolio optimization or hyperparam
+    # top-level => "Portfolio Optimization" or "Hyperparameter Optimization"
     top_choice= st.radio("Analysis Type:", ["Portfolio Optimization","Hyperparameter Optimization"], index=0)
 
     if top_choice=="Portfolio Optimization":
-        # user picks approach
-        solver_choice= st.selectbox("Solver Approach:", [
-            "Parametric (Markowitz)",
-            "Direct (Markowitz)",
-            "Parametric (CVaR)",
-            "Direct (CVaR)"
-        ], index=0)
+        solver_choice= st.selectbox(
+            "Solver Approach:",
+            [
+                "Parametric (Markowitz)",
+                "Direct (Markowitz)",
+                "Parametric (CVaR)",
+                "Direct (CVaR)"
+            ],
+            index=0
+        )
 
         with st.expander("Rolling Parameters", expanded=False):
             rebal_freq= st.selectbox("Rebalance Frequency (months)", [1,3,6], index=0)
@@ -238,7 +237,6 @@ def main():
             window_days= lookback_m* 21
 
             if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
-                # Markowitz shrinks
                 reg_cov= st.checkbox("Regularize Cov?", False)
                 do_ledoitwolf= st.checkbox("Use LedoitWolf Cov?", False)
                 do_ewm= st.checkbox("Use EWM Cov?", False)
@@ -246,12 +244,12 @@ def main():
 
                 st.write("**Mean & Cov Shrink**")
                 do_shrink_means= st.checkbox("Shrink Means?", True)
-                alpha_shrink= st.slider("Alpha (for means)",0.0,1.0,0.3,0.01)
+                alpha_shrink= st.slider("Alpha (for means)", 0.0,1.0,0.3,0.01)
                 do_shrink_cov= st.checkbox("Shrink Cov (diagonal)?", True)
-                beta_shrink= st.slider("Beta (for cov)",0.0,1.0,0.2,0.01)
+                beta_shrink= st.slider("Beta (for cov)", 0.0,1.0,0.2,0.01)
 
                 if solver_choice=="Parametric (Markowitz)":
-                    n_points_man= st.number_input("Frontier #points (Param Only)",5,100,15, step=5)
+                    n_points_man= st.number_input("Frontier #points (Param Only)", 5,100,15, step=5)
                 else:
                     n_points_man= 0
 
@@ -259,23 +257,32 @@ def main():
                 cvar_limit_in= 0.10
                 cvar_freq_user= "daily"
             else:
-                # CVaR => param or direct
+                # cvar
                 reg_cov=False; do_ledoitwolf=False; do_ewm=False; ewm_alpha=0.0
                 do_shrink_means=False; alpha_shrink=0.0
                 do_shrink_cov=False; beta_shrink=0.0
-                n_points_man= 0
+                n_points_man=0
 
-                # user selects CVaR alpha, limit (direct), and freq
                 cvar_alpha_in= st.slider("CVaR alpha", 0.0,0.9999,0.95,0.01)
                 cvar_limit_in= st.slider("CVaR limit (Direct approach)", 0.0,1.0,0.10,0.01)
                 cvar_freq_user= st.selectbox("CVaR Frequency", ["daily","weekly","monthly","annual"], index=0)
+
+            # NEW => Add a checkbox for naive approach
+            add_naive = st.checkbox("Compare with Naive (1/N)?", value=False)
 
             run_button= st.button("Run Rolling")
 
         if not run_button:
             st.stop()
 
-        # define param/direct Markowitz
+        ###################################################
+        # define the solver callables
+        ###################################################
+        from modules.optimization.cvxpy_parametric import parametric_max_sharpe_aclass_subtype
+        from modules.optimization.cvxpy_direct import direct_max_sharpe_aclass_subtype
+        from modules.optimization.cvxpy_parametric_cvar import dynamic_min_cvar_with_fallback
+        from modules.optimization.cvxpy_direct_cvar import direct_max_return_cvar_constraint_aclass_subtype
+
         def param_sharpe_fn(sub_ret: pd.DataFrame):
             w_opt, summary= parametric_max_sharpe_aclass_subtype(
                 df_returns= sub_ret,
@@ -319,9 +326,7 @@ def main():
             )
             return w_opt, summary
 
-        # define param/direct CVaR
         def param_cvar_fn(sub_ret: pd.DataFrame, old_w: np.ndarray):
-            # param CVaR => dynamic approach
             w_opt, summary= dynamic_min_cvar_with_fallback(
                 df_returns= sub_ret,
                 tickers= col_tickers,
@@ -333,7 +338,7 @@ def main():
                 cvar_alpha= cvar_alpha_in,
                 no_short=True,
                 daily_rf= daily_rf,
-                freq_choice= cvar_freq_user,  # user-chosen freq
+                freq_choice= cvar_freq_user,
                 clamp_factor= 1.5,
                 max_weight_each= 1.0,
                 max_iter=10
@@ -356,16 +361,19 @@ def main():
             )
             return w_opt, summary
 
-        # choose rolling function
+        ###################################################
+        # pick the rolling function
+        ###################################################
         from modules.backtesting.rolling_monthly import (
             rolling_backtest_monthly_param_sharpe,
             rolling_backtest_monthly_direct_sharpe,
             rolling_backtest_monthly_param_cvar,
-            rolling_backtest_monthly_direct_cvar
+            rolling_backtest_monthly_direct_cvar,
+            rolling_backtest_monthly_naive       # import naive
         )
 
         if solver_choice=="Parametric (Markowitz)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                 rolling_backtest_monthly_param_sharpe(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -379,9 +387,8 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
-            )
         elif solver_choice=="Direct (Markowitz)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                 rolling_backtest_monthly_direct_sharpe(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -395,9 +402,8 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
-            )
         elif solver_choice=="Parametric (CVaR)":
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                 rolling_backtest_monthly_param_cvar(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -411,10 +417,9 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
-            )
         else:
             # "Direct (CVaR)"
-            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = (
+            sr_line, final_w, old_w_last, final_rebal_date, df_rebal, ext_metrics_new = \
                 rolling_backtest_monthly_direct_cvar(
                     df_prices= df_sub,
                     df_instruments= df_instruments,
@@ -428,41 +433,78 @@ def main():
                     trade_buffer_pct= trade_buffer_pct,
                     daily_rf= daily_rf
                 )
-            )
 
-        # build old line => to compare
-        old_line= build_old_portfolio_line(df_instruments, df_sub)
-        idx_all= old_line.index.union(sr_line.index)
-        old_line_u= old_line.reindex(idx_all, method="ffill")
-        new_line_u= sr_line.reindex(idx_all, method="ffill")
-        old0= old_line_u.iloc[0]
-        new0= new_line_u.iloc[0]
+        # Build old line => to compare
+        old_line = build_old_portfolio_line(df_instruments, df_sub)
 
-        df_cum= pd.DataFrame({
+        # Optionally run naive if user checked
+        sr_line_naive = None
+        ext_metrics_naive = {}
+        if add_naive:
+            sr_line_naive, naive_final_w, naive_old_w, naive_rebal_date, df_rebal_naive, ext_metrics_naive = \
+                rolling_backtest_monthly_naive(
+                    df_prices=df_sub,
+                    df_instruments=df_instruments,
+                    start_date=df_sub.index[0],
+                    end_date=df_sub.index[-1],
+                    months_interval=rebal_freq,
+                    transaction_cost_value=transaction_cost_value,
+                    transaction_cost_type=cost_type,
+                    daily_rf=daily_rf
+                )
+
+        ########################################################################
+        # Combine lines (old, new, naive if any)
+        ########################################################################
+        idx_all = old_line.index.union(sr_line.index)
+        if sr_line_naive is not None:
+            idx_all = idx_all.union(sr_line_naive.index)
+
+        old_line_u = old_line.reindex(idx_all, method="ffill")
+        new_line_u = sr_line.reindex(idx_all, method="ffill")
+        naive_line_u = sr_line_naive.reindex(idx_all, method="ffill") if sr_line_naive is not None else None
+
+        # Rebase each so chart is in "relative %" from day 0
+        old0 = old_line_u.iloc[0]
+        new0 = new_line_u.iloc[0]
+
+        df_cum = pd.DataFrame({
             "Old(%)": (old_line_u/old0 -1)*100,
             "New(%)": (new_line_u/new0 -1)*100
         }, index= idx_all)
+
+        if naive_line_u is not None:
+            naive0 = naive_line_u.iloc[0]
+            df_cum["Naive(%)"] = (naive_line_u/naive0 -1)*100
+
         st.line_chart(df_cum)
 
-        # extended metrics
-        ext_metrics_old= compute_extended_metrics(old_line_u, daily_rf=daily_rf)
-        performance_keys= ["Total Return","Annual Return","Annual Vol","Sharpe"]
-        risk_keys= ["MaxDD","TimeToRecovery","VaR_1M99","CVaR_1M99"]
-        ratio_keys= ["Skew","Kurtosis","Sortino","Calmar","Omega"]
+        # Extended metrics
+        ext_metrics_old = compute_extended_metrics(old_line_u, daily_rf=daily_rf)
 
-        def build_metric_df(metric_keys, old_m, new_m):
-            rows= []
+        # Build a 3-column table if naive is present, else 2-column
+        def build_metric_df(metric_keys, dict_old, dict_new, dict_naive=None):
+            """
+            If dict_naive is provided, we create columns [Old, Naive, New].
+            Otherwise, [Old, New].
+            """
+            rows = []
             for mk in metric_keys:
-                val_old= old_m.get(mk,0.0)
-                val_new= new_m.get(mk,0.0)
-                rows.append((mk,val_old,val_new))
-            df_out= pd.DataFrame(rows, columns=["Metric","Old","New"])
+                val_old = dict_old.get(mk, 0.0)
+                val_new = dict_new.get(mk, 0.0)
+                if dict_naive is not None:
+                    val_naive = dict_naive.get(mk, 0.0)
+                    rows.append((mk, val_old, val_naive, val_new))
+                else:
+                    rows.append((mk, val_old, val_new))
+
+            if dict_naive is not None:
+                df_out = pd.DataFrame(rows, columns=["Metric","Old","Naive","New"])
+            else:
+                df_out = pd.DataFrame(rows, columns=["Metric","Old","New"])
+
             df_out.set_index("Metric", inplace=True)
             return df_out
-
-        df_perf_table= build_metric_df(performance_keys, ext_metrics_old, ext_metrics_new)
-        df_risk_table= build_metric_df(risk_keys,        ext_metrics_old, ext_metrics_new)
-        df_ratio_table= build_metric_df(ratio_keys,      ext_metrics_old, ext_metrics_new)
 
         def format_ext(df_):
             def format_val(mk,val):
@@ -473,27 +515,42 @@ def main():
                     return f"{val:.0f}"
                 else:
                     return f"{val:.3f}"
+
             dfx= df_.copy()
             for mk in dfx.index:
-                for colx in ["Old","New"]:
+                for colx in dfx.columns:
                     rawv= dfx.loc[mk,colx]
                     dfx.loc[mk,colx]= format_val(mk,rawv)
             return dfx
 
+        performance_keys = ["Total Return","Annual Return","Annual Vol","Sharpe"]
+        risk_keys        = ["MaxDD","TimeToRecovery","VaR_1M99","CVaR_1M99"]
+        ratio_keys       = ["Skew","Kurtosis","Sortino","Calmar","Omega"]
+
+        # 1) Performance
+        df_perf_table = build_metric_df(performance_keys, ext_metrics_old, ext_metrics_new, ext_metrics_naive if add_naive else None)
         st.write("### Extended Metrics - Performance")
         st.dataframe(format_ext(df_perf_table))
+
+        # 2) Risk
+        df_risk_table = build_metric_df(risk_keys, ext_metrics_old, ext_metrics_new, ext_metrics_naive if add_naive else None)
         st.write("### Extended Metrics - Risk")
         st.dataframe(format_ext(df_risk_table))
+
+        # 3) Ratios
+        df_ratio_table= build_metric_df(ratio_keys, ext_metrics_old, ext_metrics_new, ext_metrics_naive if add_naive else None)
         st.write("### Extended Metrics - Ratios")
         st.dataframe(format_ext(df_ratio_table))
 
+        # Weight diffs only for "new" vs old
         from modules.analytics.weight_display import display_instrument_weight_diff, display_class_weight_diff
         display_instrument_weight_diff(df_instruments, col_tickers, final_w)
         display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
+        # Transaction cost (for the "new" approach)
         final_val= sr_line.iloc[-1]
         cost_stats= compute_cost_impact(df_rebal, final_val)
-        st.write("### Transaction Cost Impact")
+        st.write("### Transaction Cost Impact (New Ptf)")
         df_cost_stats= pd.DataFrame([cost_stats])
         st.dataframe(df_cost_stats.style.format({
             "Total Cost":"{:.4f}",
@@ -514,18 +571,18 @@ def main():
         if rebal_dates[-1]< last_day:
             rebal_dates.append(last_day)
 
-        st.write("### Interval Performance")
+        st.write("### Interval Performance (Old vs New)")
         from modules.backtesting.rolling_intervals import display_interval_bars_and_stats
         display_interval_bars_and_stats(
             sr_line_old= old_line_u,
-            sr_line_new= sr_line,
+            sr_line_new= new_line_u,
             rebal_dates= rebal_dates,
             label_old="Old",
             label_new="New",
             display_mode="grouped"
         )
 
-        st.write("### Drawdown Over Time")
+        st.write("### Drawdown Over Time (Old vs New)")
         from modules.backtesting.max_drawdown import plot_drawdown_series, show_max_drawdown_comparison
         df_compare= pd.DataFrame({
             "Old_Ptf": old_line_u* old0,
@@ -534,10 +591,10 @@ def main():
         fig_dd= plot_drawdown_series(df_compare)
         st.plotly_chart(fig_dd)
         df_dd_comp= show_max_drawdown_comparison(df_compare)
-        st.write("### Max Drawdown Comparison")
+        st.write("### Max Drawdown Comparison (Old vs New)")
         st.dataframe(df_dd_comp.style.format("{:.2%}"))
 
-        # if Markowitz => 12-month frontier
+        # Markowitz frontier
         if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
             st.write("### 12-Month Final Frontier")
             from modules.optimization.efficient_frontier import (
@@ -618,7 +675,8 @@ def main():
             use_direct_gs= st.checkbox("Use Direct Solver in Grid Search?", value=False)
 
             if st.button("Run Grid Search"):
-                if not frontier_points_list or not alpha_list or not beta_list or not rebal_freq_list or not lookback_list:
+                if not frontier_points_list or not alpha_list or not beta_list \
+                   or not rebal_freq_list or not lookback_list:
                     st.error("Select at least one param in each list.")
                 else:
                     df_gs= rolling_grid_search(
@@ -671,6 +729,7 @@ def main():
             if not df_bayes.empty:
                 st.write("Bayesian Search Results:")
                 st.dataframe(df_bayes)
+
 
 if __name__=="__main__":
     main()
