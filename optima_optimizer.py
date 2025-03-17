@@ -131,7 +131,7 @@ def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFra
     df_prices= df_prices.sort_index().fillna(method="ffill").fillna(method="bfill")
     ticker_qty= {}
     for _, row in df_instruments.iterrows():
-        tkr= row["#ID"]
+        tkr= row["#Ticker"]
         qty= row["#Quantity"]
         ticker_qty[tkr]= qty
     col_list= df_prices.columns
@@ -189,7 +189,7 @@ def main():
     asset_cls_list= []
     sec_type_list= []
     for tk in col_tickers:
-        row_= df_instruments[df_instruments["#ID"]== tk]
+        row_= df_instruments[df_instruments["#Ticker"]== tk]
         if not row_.empty:
             asset_cls_list.append(row_["#Asset_Class"].iloc[0])
             if have_sec:
@@ -638,7 +638,7 @@ def main():
 
                 old_map= {}
                 for i, tk in enumerate(col_tickers):
-                    row_= df_instruments[df_instruments["#ID"]== tk]
+                    row_= df_instruments[df_instruments["#Ticker"]== tk]
                     if not row_.empty:
                         old_map[i]= row_["Weight_Old"].iloc[0]
                     else:

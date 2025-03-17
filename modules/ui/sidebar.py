@@ -37,7 +37,7 @@ def get_main_constraints_sidebar(df_instruments: pd.DataFrame, df_prices: pd.Dat
     st.sidebar.write(f"Selected Constraint Mode: {constraint_mode}")
 
     have_sec_type = ("#Security_Type" in df_instruments.columns)
-    all_classes = df_instruments["#Asset"].unique()
+    all_classes = df_instruments["#Asset_Class"].unique()
 
     class_sum_constraints = {}
     subtype_constraints = {}
@@ -58,7 +58,7 @@ def get_main_constraints_sidebar(df_instruments: pd.DataFrame, df_prices: pd.Dat
                     "max_class_weight": mx_cls / 100.0
                 }
                 if have_sec_type:
-                    df_cl = df_instruments[df_instruments["#Asset"] == cl]
+                    df_cl = df_instruments[df_instruments["#Asset_Class"] == cl]
                     st.markdown("**Per-Instrument (Security-Type) Constraints**")
                     stypes = df_cl["#Security_Type"].dropna().unique()
                     if len(stypes) > 0:
@@ -83,7 +83,7 @@ def get_main_constraints_sidebar(df_instruments: pd.DataFrame, df_prices: pd.Dat
             with st.sidebar.expander(f"Asset Class: {cl} (keep_current)", expanded=False):
                 st.markdown("Class-level weights auto from old portfolio +/- buffer.")
                 if have_sec_type:
-                    df_cl = df_instruments[df_instruments["#Asset"] == cl]
+                    df_cl = df_instruments[df_instruments["#Asset_Class"] == cl]
                     st.markdown("**Security-Type Constraints**")
                     stypes = df_cl["#Security_Type"].dropna().unique()
                     if len(stypes) > 0:

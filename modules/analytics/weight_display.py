@@ -29,7 +29,7 @@ def display_instrument_weight_diff(
     asset_map= {}
 
     for _, row_ in df_instruments.iterrows():
-        tkr= row_["#ID"]
+        tkr= row_["#Ticker"]
         old_weight_map[tkr]= row_["Weight_Old"]
         # if your sheet has "#Name" => store it
         name_map[tkr] = row_.get("#Name","")
@@ -93,7 +93,7 @@ def display_class_weight_diff(
 
     old_weight_map= {}
     for _, row_ in df_instruments.iterrows():
-        tkr= row_["#ID"]
+        tkr= row_["#Ticker"]
         old_weight_map[tkr]= row_["Weight_Old"]
 
     sum_old= defaultdict(float)
