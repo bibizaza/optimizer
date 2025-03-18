@@ -80,7 +80,7 @@ def sidebar_data_and_constraints():
         return df_instruments, df_prices, coverage, main_constr
 
     elif approach_data == "Use Excel for Analysis":
-        excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
+        excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx","xlsm"])
         if excel_file:
             df_instruments, df_prices = parse_excel(excel_file)
             if not df_prices.empty:
