@@ -169,7 +169,7 @@ def compute_efficient_frontier_cvxpy(
                 if df_instruments is not None:
                     dfc = df_instruments[df_instruments["#ID"] == tk]
                     if not dfc.empty:
-                        cl_ = dfc["#Asset"].iloc[0]
+                        cl_ = dfc["#Asset_Class"].iloc[0]
                         if cl_ == cl:
                             idxs.append(i)
             if len(idxs) > 0:
