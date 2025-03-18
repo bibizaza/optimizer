@@ -36,7 +36,7 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
 
     st.sidebar.write(f"Mode: {constraint_mode}")
     have_sec_type = ("#Security_Type" in df_instruments.columns)
-    all_classes   = df_instruments["#Asset"].unique()
+    all_classes   = df_instruments["#Asset_Class"].unique()
 
     # Make sure we compute Weight_Old if needed
     if "#Quantity" in df_instruments.columns and "#Last_Price" in df_instruments.columns:
@@ -64,7 +64,7 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
                 }
                 # Subtype
                 if have_sec_type:
-                    df_cl = df_instruments[df_instruments["#Asset"]==cl]
+                    df_cl = df_instruments[df_instruments["#Asset_Class"]==cl]
                     st.markdown("**Per-Instrument (Security-Type) Constraints**")
                     stypes = df_cl["#Security_Type"].dropna().unique()
                     for stp in stypes:
@@ -83,7 +83,7 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
         buff_in = st.sidebar.number_input("Buffer (%) around old class weight", 0.0, 100.0, 5.0, step=1.0)
         buffer_pct = buff_in/100.0
 
-        class_old_w = df_instruments.groupby("#Asset")["Weight_Old"].sum()
+        class_old_w = df_instruments.groupby("#Asset_Class")["Weight_Old"].sum()
         for cl in all_classes:
             oldw = class_old_w.get(cl, 0.0)
             mn = max(0.0, oldw - buffer_pct)
@@ -95,7 +95,7 @@ def get_main_constraints(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) 
             with st.sidebar.expander(f"Asset Class: {cl} (keep_current)", expanded=False):
                 st.write(f"Old weight = {oldw*100:.2f}%, buffer = ±{buffer_pct*100:.2f}% => range = [{mn*100:.2f}..{mx*100:.2f}]%")
                 if have_sec_type:
-                    df_cl = df_instruments[df_instruments["#Asset"]==cl]
+                    df_cl = df_instruments[df_instruments["#Asset_Class"]==cl]
                     st.markdown("**Security-Type Constraints**")
                     stypes = df_cl["#Security_Type"].dropna().unique()
                     for stp in stypes:

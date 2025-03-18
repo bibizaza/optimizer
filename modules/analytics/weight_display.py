@@ -34,7 +34,7 @@ def display_instrument_weight_diff(
         # if your sheet has "#Name" => store it
         name_map[tkr] = row_.get("#Name","")
         # if your sheet has "#Asset" => store it
-        asset_map[tkr] = row_.get("#Asset","Unknown")
+        asset_map[tkr] = row_.get("#Asset_Class","Unknown")
 
     # 2) Build a table (DataFrame) row by row
     rows= []
