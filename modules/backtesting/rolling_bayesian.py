@@ -1,4 +1,4 @@
-# File: modules/backtesting/rolling_bayesian.py
+# File: rolling_bayesian.py
 
 import streamlit as st
 import pandas as pd
@@ -8,8 +8,14 @@ import time
 # scikit-optimize
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
+from skopt.learning import GaussianProcessRegressor
+from skopt.learning.gaussian_process.kernels import (
+    RBF, Matern, RationalQuadratic
+)
 
-# This function presumably runs one combo with the chosen solver approach
+# Hypothetical helper that executes a single combination of hyperparams
+# for param vs direct approach, etc. Make sure you have the correct import:
+# from modules.backtesting.rolling_gridsearch import run_one_combo
 from modules.backtesting.rolling_gridsearch import run_one_combo
 
 
@@ -26,14 +32,14 @@ def rolling_bayesian_optimization(
     trade_buffer_pct: float
 ) -> pd.DataFrame:
     """
-    Bayesian Optimization over multiple parameters, with a solver approach:
-    - "Parametric (cvxpy)" => n_points in param space
-    - "Direct (cvxpy)" => no frontier scanning needed
+    Bayesian Optimization with a user-configurable Gaussian Process (GP) as the surrogate.
     """
 
     st.write("## Bayesian Optimization")
 
-    # 1) Let user pick solver approach: Param or Direct
+    # -------------------------------------------
+    # 1) Choose solver approach: param or direct
+    # -------------------------------------------
     solver_choice = st.radio(
         "Solver Approach for Bayesian?",
         ["Parametric (cvxpy)", "Direct (cvxpy)"],
@@ -41,17 +47,15 @@ def rolling_bayesian_optimization(
     )
     use_direct_solver = (solver_choice == "Direct (cvxpy)")
 
-    # 2) Number of Bayesian evaluations
+    # # of Bayesian evaluations
     n_calls = st.number_input("Number of Bayesian evaluations (n_calls)", 5, 500, 20, step=5)
 
-    # --------------------------------------------------------------
-    # 3) If NOT using direct solver => show n_points UI
-    # --------------------------------------------------------------
+    # If param => let user specify frontier n_points or range
     if not use_direct_solver:
         st.write("### Efficient Frontier Points Option")
-        points_option = st.radio("Select n_points Option:", ["Range", "Fixed"], index=0)
+        points_option = st.radio("Select how to pick n_points:", ["Range", "Fixed"], index=0)
         if points_option == "Fixed":
-            fixed_points = st.number_input("n_points", 1, 999, 50, step=1)
+            fixed_points = st.number_input("Frontier n_points", 1, 999, 50, step=1)
             n_points_space = Categorical([fixed_points], name="n_points")
         else:
             c1, c2 = st.columns(2)
@@ -61,13 +65,12 @@ def rolling_bayesian_optimization(
                 max_npts = st.number_input("Max n_points", 1, 999, 50, step=5)
             n_points_space = Integer(int(min_npts), int(max_npts), name="n_points")
     else:
-        # Hide the n_points UI entirely; we won't add it to the space
         n_points_space = None
 
-    # --------------------------------------------------------------
-    # 4) The rest of the parameter ranges
-    # --------------------------------------------------------------
-    st.write("### Parameter Ranges")
+    # -------------------------------------------
+    # 2) The rest of param ranges: alpha, beta, etc.
+    # -------------------------------------------
+    st.write("### Hyperparameter Ranges")
 
     alpha_min = st.slider("Alpha min (mean shrink)", 0.0, 1.0, 0.0, 0.05)
     alpha_max = st.slider("Alpha max (mean shrink)", 0.0, 1.0, 1.0, 0.05)
@@ -91,29 +94,25 @@ def rolling_bayesian_optimization(
     ewm_alpha_min = st.slider("EWM alpha min", 0.0, 1.0, 0.0, 0.05)
     ewm_alpha_max = st.slider("EWM alpha max", 0.0, 1.0, 1.0, 0.05)
 
-    # --------------------------------------------------------------
-    # 5) Build the parameter space
-    # --------------------------------------------------------------
+    # The base dimension list
     space_common = [
         Real(alpha_min, alpha_max, name="alpha_"),
-        Real(beta_min, beta_max, name="beta_"),
-        Categorical(freq_choices, name="freq_"),
-        Categorical(lb_choices, name="lb_"),
+        Real(beta_min, beta_max,   name="beta_"),
+        Categorical(freq_choices,  name="freq_"),
+        Categorical(lb_choices,    name="lb_"),
         Categorical(ewm_bool_choices, name="do_ewm_"),
         Real(ewm_alpha_min, ewm_alpha_max, name="ewm_alpha_")
     ]
-
     if use_direct_solver:
-        # Direct approach => no n_points in the space
+        # Direct => no n_points in dimension
         space = space_common
     else:
-        # Param approach => add n_points
         space = [n_points_space] + space_common
 
-    # We'll store tries in a list
+    # We'll store partial results here
     tries_list = []
 
-    # UI for progress
+    # For progress
     progress_bar = st.progress(0)
     progress_text = st.empty()
     start_time = time.time()
@@ -125,26 +124,24 @@ def rolling_bayesian_optimization(
         progress_text.text(f"Progress: {pct}% complete. Elapsed: {elapsed:.1f}s")
         progress_bar.progress(pct)
 
-    # --------------------------------------------------------------
-    # 6) The objective function
-    # --------------------------------------------------------------
+    # -------------------------------------------
+    # 3) Define the objective function
+    # -------------------------------------------
     def objective(x):
         """
-        If use_direct_solver => we skip n_points (x[0]).
-        If param => x[0] is n_points, x[1].. are alpha, beta, etc.
+        If direct => x is [alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_].
+        If param => x is [n_points_, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_].
         """
         try:
             if use_direct_solver:
-                # direct => x => [alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_]
                 alpha_     = x[0]
                 beta_      = x[1]
                 freq_      = x[2]
                 lb_        = x[3]
                 do_ewm_    = x[4]
                 ewm_alpha_ = x[5]
-                n_points_  = None  # not used
+                n_points_  = None
             else:
-                # param => x => [n_points_, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_]
                 n_points_  = x[0]
                 alpha_     = x[1]
                 beta_      = x[2]
@@ -153,13 +150,12 @@ def rolling_bayesian_optimization(
                 do_ewm_    = x[5]
                 ewm_alpha_ = x[6]
 
-            # clamp ewm_alpha
-            if do_ewm_ and ewm_alpha_ <= 0:
-                ewm_alpha_ = 1e-6
-            elif do_ewm_ and ewm_alpha_ > 1:
-                ewm_alpha_ = 1.0
+            # clamp ewm_alpha if do_ewm_ is True
+            if do_ewm_:
+                if ewm_alpha_ <= 0: ewm_alpha_ = 1e-6
+                if ewm_alpha_ > 1:  ewm_alpha_ = 1.0
 
-            # run_one_combo => pass use_direct_solver
+            # Run a single combo of hyperparams
             result_dict = run_one_combo(
                 df_prices=df_prices,
                 df_instruments=df_instruments,
@@ -180,7 +176,7 @@ def rolling_bayesian_optimization(
                 do_ledoitwolf=False,
                 do_ewm=do_ewm_,
                 ewm_alpha=ewm_alpha_,
-                use_direct_solver=use_direct_solver  # pass solver approach
+                use_direct_solver=use_direct_solver
             )
 
             sr_val = result_dict["Sharpe Ratio"]
@@ -197,38 +193,68 @@ def rolling_bayesian_optimization(
                 "Annual Vol": result_dict["Annual Vol"]
             })
 
-            # Minimizing negative Sharpe => return -SR
             if np.isnan(sr_val) or np.isinf(sr_val):
                 return 1e9
-            return -sr_val
-
+            return -sr_val  # we minimize negative SR => maximize SR
         except Exception as e:
             st.error(f"Error in objective with params {x}: {e}")
-            tries_list.append({
-                "n_points": x[0] if not use_direct_solver else "direct",
-                "alpha": x[1] if not use_direct_solver else x[0],
-                "error": str(e)
-            })
+            tries_list.append({"params": x, "error": str(e)})
             return 1e9
 
-    # --------------------------------------------------------------
-    # 7) Actually run the Bayesian search
-    # --------------------------------------------------------------
+    # -------------------------------------------
+    # 4) Expose GP configuration
+    # -------------------------------------------
+    st.write("### Gaussian Process Settings")
+
+    kernel_choice = st.selectbox("Select GP Kernel", ["Matern", "RBF", "RationalQuadratic"], index=0)
+    length_scale_init = st.slider("Kernel length_scale", 0.1, 10.0, 1.0, 0.1)
+
+    # If Matern => let user pick nu
+    default_nu = 2.5
+    matern_nu = st.selectbox("Matern Nu (smoothness)", [0.5, 1.5, 2.5], index=2)
+
+    alpha_val = st.number_input("GP alpha (noise)", min_value=1e-9, max_value=1.0, value=0.01, step=0.01, format="%.6f")
+    normalize_y = st.checkbox("Normalize GP outputs (Sharpe)?", value=True)
+
+    # Build the chosen kernel
+    if kernel_choice == "Matern":
+        chosen_kernel = Matern(length_scale=length_scale_init, nu=matern_nu)
+    elif kernel_choice == "RationalQuadratic":
+        chosen_kernel = RationalQuadratic(length_scale=length_scale_init, alpha=1.0)
+    else:  # "RBF"
+        from skopt.learning.gaussian_process.kernels import RBF
+        chosen_kernel = RBF(length_scale=length_scale_init)
+
+    # Create the custom GP
+    gp_model = GaussianProcessRegressor(
+        kernel=chosen_kernel,
+        alpha=alpha_val,
+        normalize_y=normalize_y,
+        random_state=42
+    )
+
+    # -------------------------------------------
+    # 5) Actually run the Bayesian search
+    # -------------------------------------------
     if not st.button("Run Bayesian Optimization"):
         return pd.DataFrame()
 
     with st.spinner("Running Bayesian optimization..."):
         res = gp_minimize(
-            objective,
-            space,
+            func=objective,
+            dimensions=space,
+            base_estimator=gp_model,  # <--- the GP
             n_calls=n_calls,
             random_state=42,
             callback=[on_step]
         )
 
+    # Prepare final results
     df_out = pd.DataFrame(tries_list)
     if not df_out.empty:
+        # Show best combo
         best_ = df_out.sort_values("Sharpe Ratio", ascending=False).iloc[0]
         st.write("**Best Found** =>", dict(best_))
         st.dataframe(df_out)
+
     return df_out
