@@ -1,4 +1,4 @@
-# modules/optimization/efficient_frontier.py
+# File: modules/optimization/efficient_frontier.py
 
 import pandas as pd
 import numpy as np
@@ -57,6 +57,7 @@ def ledoitwolf_cov(df_returns: pd.DataFrame) -> np.ndarray:
     """
     return df_returns.cov().values
 
+
 ########################################################################
 # 2) Cached Build Mean/Cov
 ########################################################################
@@ -95,8 +96,9 @@ def build_advanced_mean_cov(
 
     return raw_means, cov_
 
+
 ########################################################################
-# 3) CVXPY-based Frontier
+# 3) CVXPY-based Frontier (with SHIFT & psd_wrap fix)
 ########################################################################
 
 def compute_efficient_frontier_cvxpy(
@@ -126,7 +128,7 @@ def compute_efficient_frontier_cvxpy(
     Returns two arrays: (fvol, fret) => frontier vol & ret, both annualized.
     """
     # 1) build daily means + cov (with caching)
-    mean_ret_d, cov_ = build_advanced_mean_cov(
+    mean_ret_d, cov_raw = build_advanced_mean_cov(
         df_returns,
         do_shrink_means, alpha,
         do_shrink_cov, beta,
@@ -134,8 +136,11 @@ def compute_efficient_frontier_cvxpy(
         regularize_cov
     )
 
-    def vol_daily(w):
-        return np.sqrt(w.T @ cov_ @ w)
+    # 1b) SHIFT & wrap => avoid ARPACK NoConvergence in PSD check
+    SHIFT_EPS = 1e-8
+    cov_shifted = cov_raw + SHIFT_EPS * np.eye(len(cov_raw))
+    P = cp.psd_wrap(cov_shifted)
+
     def ret_daily(w):
         return mean_ret_d @ w
 
@@ -144,7 +149,7 @@ def compute_efficient_frontier_cvxpy(
 
     candidate_targets = np.linspace(ret_min_d, ret_max_d, n_points)
 
-    # If we want to ensure final_w's return is in the candidate set:
+    # If we want to ensure final_w's return is included
     if final_w is not None:
         final_ret_d = ret_daily(final_w)
         candidate_targets = np.append(candidate_targets, final_ret_d)
@@ -159,10 +164,10 @@ def compute_efficient_frontier_cvxpy(
 
     for targ_d in candidate_targets:
         w = cp.Variable(n_assets)
-        objective = cp.Minimize(cp.quad_form(w, cov_))
+        objective = cp.Minimize(cp.quad_form(w, P))
         constraints = [cp.sum(w) == 1, w >= 0]
 
-        # If we have class constraints
+        # class constraints
         for cl, cc in class_constraints.items():
             idxs = []
             for i, tk in enumerate(tickers):
@@ -177,31 +182,37 @@ def compute_efficient_frontier_cvxpy(
                     constraints.append(cp.sum(w[idxs]) >= cc["min_class_weight"])
                 if "max_class_weight" in cc:
                     constraints.append(cp.sum(w[idxs]) <= cc["max_class_weight"])
+                # optional: max_instrument_weight
                 if "max_instrument_weight" in cc:
                     for i_ in idxs:
                         constraints.append(w[i_] <= cc["max_instrument_weight"])
 
-        # target daily return >= targ_d
+        # require daily return >= targ_d
         constraints.append(ret_daily(w) >= targ_d)
 
         prob = cp.Problem(objective, constraints)
-        prob.solve(solver=cp.SCS, verbose=False)
+        try:
+            prob.solve(solver=cp.ECOS, verbose=False)
+        except (cp.SolverError, cp.error.SolverError):
+            continue
+
         if prob.status in ["optimal", "optimal_inaccurate"] and w.value is not None:
             w_ = w.value
-            vd = vol_daily(w_)
-            rd = ret_daily(w_)
-            vol_ann = vd * np.sqrt(252)
-            ret_ann = rd * 252
+            # compute annualized vol/ret
+            vol_daily_ = np.sqrt(w_.T @ cov_shifted @ w_)
+            ret_daily_ = mean_ret_d @ w_
+            vol_ann = float(vol_daily_ * np.sqrt(252))
+            ret_ann = float(ret_daily_ * 252)
             if ret_ann >= clamp_min_return:
                 frontier_points.append((vol_ann, ret_ann))
 
-    # sort by ascending vol
+    # sort ascending by vol
     frontier_points.sort(key=lambda x: x[0])
 
     # remove dominated if asked
     if remove_dominated:
         cleaned = []
-        best_ret = -9999999
+        best_ret = -999999.0
         for (v, r) in frontier_points:
             if r > best_ret:
                 cleaned.append((v, r))
@@ -210,9 +221,11 @@ def compute_efficient_frontier_cvxpy(
 
     if not frontier_points:
         return np.array([]), np.array([])
+
     fvol = np.array([p[0] for p in frontier_points])
     fret = np.array([p[1] for p in frontier_points])
     return fvol, fret
+
 
 ########################################################################
 # 4) A Helper to Specifically Use a 12-Month Window
@@ -246,12 +259,8 @@ def compute_efficient_frontier_12m(
         # If you have less than 253 rows total, just use all
         df_12m = df_prices.copy()
     else:
-        last_day = df_prices.index[-1]
-        # ~252 days from the end
-        one_year_ago = df_prices.index[-252]
-        # If you prefer to do a real date range:
-        # one_year_ago = last_day - pd.Timedelta(days=365)
-        df_12m = df_prices.loc[one_year_ago:last_day].copy()
+        # last 252 rows by index
+        df_12m = df_prices.iloc[-252:].copy()
 
     df_returns_12m = df_12m.pct_change().fillna(0.0)
 
@@ -274,6 +283,7 @@ def compute_efficient_frontier_12m(
         df_instruments=df_instruments
     )
     return fvol, fret
+
 
 ########################################################################
 # 5) Plotting Helpers
@@ -317,6 +327,7 @@ def plot_frontier_comparison(front_vol: np.ndarray,
     on the frontier at old vol. All returns are in annual % (front_ret, old_ret, new_ret).
     """
     import plotly.express as px
+
     def fmt2(x):
         return float(f"{x*100:.2f}")
 
@@ -326,44 +337,60 @@ def plot_frontier_comparison(front_vol: np.ndarray,
     old_ret_pct = fmt2(old_ret)
     new_vol_pct = fmt2(new_vol)
     new_ret_pct = fmt2(new_ret)
-    same_vol_pct = fmt2(same_vol)
-    same_ret_pct = fmt2(same_ret)
+    same_vol_pct = fmt2(same_vol) if same_vol is not None else None
+    same_ret_pct = fmt2(same_ret) if same_ret is not None else None
 
     df_front = pd.DataFrame({"Vol(%)": fvol_pct, "Ret(%)": fret_pct})
-    fig = px.scatter(df_front, x="Vol(%)", y="Ret(%)", title=title,
-                     labels={"Vol(%)": "Annual Vol (%)", "Ret(%)": "Annual Return (%)"})
+    fig = px.scatter(
+        df_front, x="Vol(%)", y="Ret(%)",
+        title=title,
+        labels={"Vol(%)": "Annual Vol (%)", "Ret(%)": "Annual Return (%)"}
+    )
     fig.update_traces(mode="markers+lines")
 
-    # Old vs new vs sameVol
-    fig.add_scatter(x=[old_vol_pct], y=[old_ret_pct],
-                    mode="markers", name="Old (Real)",
-                    marker=dict(color="red", size=10))
-    fig.add_scatter(x=[new_vol_pct], y=[new_ret_pct],
-                    mode="markers", name="New (Optimized)",
-                    marker=dict(color="green", size=10))
-    fig.add_scatter(x=[same_vol_pct], y=[same_ret_pct],
-                    mode="markers", name="Frontier (Same Vol)",
-                    marker=dict(color="blue", size=12, symbol="diamond"))
+    # Old vs new
+    fig.add_scatter(
+        x=[old_vol_pct], y=[old_ret_pct],
+        mode="markers", name="Old (Real)",
+        marker=dict(color="red", size=10)
+    )
+    fig.add_scatter(
+        x=[new_vol_pct], y=[new_ret_pct],
+        mode="markers", name="New (Optimized)",
+        marker=dict(color="green", size=10)
+    )
 
-    # optional lines
-    ylo = min(old_ret_pct, same_ret_pct)
-    yhi = max(old_ret_pct, same_ret_pct)
-    left_x = min(fvol_pct + [old_vol_pct, new_vol_pct, same_vol_pct])
-    fig.add_shape(type="line", xref="x", yref="y",
-                  x0=old_vol_pct, x1=old_vol_pct,
-                  y0=ylo, y1=yhi,
-                  line=dict(color="lightgrey", dash="dash", width=2),
-                  layer="below")
-    fig.add_shape(type="line", xref="x", yref="y",
-                  x0=left_x, x1=same_vol_pct,
-                  y0=same_ret_pct, y1=same_ret_pct,
-                  line=dict(color="lightgrey", dash="dash", width=2),
-                  layer="below")
+    # If same_vol is not None => plot that point
+    if same_vol_pct is not None and same_ret_pct is not None:
+        fig.add_scatter(
+            x=[same_vol_pct], y=[same_ret_pct],
+            mode="markers", name="Frontier (Same Vol)",
+            marker=dict(color="blue", size=12, symbol="diamond")
+        )
+        # optional lines from old to sameVol
+        ylo = min(old_ret_pct, same_ret_pct)
+        yhi = max(old_ret_pct, same_ret_pct)
+        left_x = min(min(fvol_pct), old_vol_pct, new_vol_pct, same_vol_pct)
 
-    fig.add_annotation(xref="x", yref="y",
-                       x=left_x, y=same_ret_pct,
-                       text=f"{same_ret_pct:.2f}%",
-                       showarrow=True, arrowhead=2,
-                       arrowcolor="lightgrey", ax=arrow_shift, ay=0,
-                       font=dict(color="lightgrey"))
+        fig.add_shape(
+            type="line", xref="x", yref="y",
+            x0=old_vol_pct, x1=old_vol_pct, y0=ylo, y1=yhi,
+            line=dict(color="lightgrey", dash="dash", width=2),
+            layer="below"
+        )
+        fig.add_shape(
+            type="line", xref="x", yref="y",
+            x0=left_x, x1=same_vol_pct, y0=same_ret_pct, y1=same_ret_pct,
+            line=dict(color="lightgrey", dash="dash", width=2),
+            layer="below"
+        )
+        fig.add_annotation(
+            xref="x", yref="y",
+            x=left_x, y=same_ret_pct,
+            text=f"{same_ret_pct:.2f}%",
+            showarrow=True, arrowhead=2,
+            arrowcolor="lightgrey", ax=arrow_shift, ay=0,
+            font=dict(color="lightgrey")
+        )
+
     return fig

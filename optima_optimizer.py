@@ -55,12 +55,15 @@ from modules.analytics.weight_display import (
 )
 from modules.analytics.extended_metrics import compute_extended_metrics
 
-# NEW => Import the new "display_extended_metrics" function from display_utils
+# For "Extended Metrics" display
 from modules.analytics.display_utils import display_extended_metrics
+
+# NEW: for Excel export
+from modules.export.export_backtest_to_excel import export_backtest_results_to_excel
 
 
 ###############################################################################
-# Data & constraints from sidebar
+# data & constraints => from constraints.py
 ###############################################################################
 def sidebar_data_and_constraints():
     st.sidebar.title("Data Loading")
@@ -80,7 +83,7 @@ def sidebar_data_and_constraints():
         return df_instruments, df_prices, coverage, main_constr
 
     elif approach_data == "Use Excel for Analysis":
-        excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx","xlsm"])
+        excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx or .xlsm)", type=["xlsx","xlsm"])
         if excel_file:
             df_instruments, df_prices = parse_excel(excel_file)
             if not df_prices.empty:
@@ -186,6 +189,7 @@ def main():
     for tk in col_tickers:
         row_ = df_instruments[df_instruments["#ID"] == tk]
         if not row_.empty:
+            # HERE => changed from #Asset => #Asset_Class, if your Excel uses #Asset_Class now:
             asset_cls_list.append(row_["#Asset_Class"].iloc[0])
             if have_sec:
                 stp = row_["#Security_Type"].iloc[0]
@@ -269,6 +273,7 @@ def main():
 
         # define param/direct Markowitz
         def param_sharpe_fn(sub_ret: pd.DataFrame):
+            from modules.optimization.cvxpy_parametric import parametric_max_sharpe_aclass_subtype
             w_opt, summary= parametric_max_sharpe_aclass_subtype(
                 df_returns= sub_ret,
                 tickers= col_tickers,
@@ -291,6 +296,7 @@ def main():
             return w_opt, summary
 
         def direct_sharpe_fn(sub_ret: pd.DataFrame):
+            from modules.optimization.cvxpy_direct import direct_max_sharpe_aclass_subtype
             w_opt, summary= direct_max_sharpe_aclass_subtype(
                 df_returns= sub_ret,
                 tickers= col_tickers,
@@ -313,6 +319,7 @@ def main():
 
         # define param/direct CVaR
         def param_cvar_fn(sub_ret: pd.DataFrame, old_w: np.ndarray):
+            from modules.optimization.cvxpy_parametric_cvar import dynamic_min_cvar_with_fallback
             w_opt, summary= dynamic_min_cvar_with_fallback(
                 df_returns= sub_ret,
                 tickers= col_tickers,
@@ -332,6 +339,7 @@ def main():
             return w_opt, summary
 
         def direct_cvar_fn(sub_ret: pd.DataFrame):
+            from modules.optimization.cvxpy_direct_cvar import direct_max_return_cvar_constraint_aclass_subtype
             w_opt, summary= direct_max_return_cvar_constraint_aclass_subtype(
                 df_returns= sub_ret,
                 tickers= col_tickers,
@@ -427,7 +435,7 @@ def main():
         # Extended metrics
         ext_metrics_old= compute_extended_metrics(old_line_u, daily_rf=daily_rf)
 
-        # *** Use the newly imported function from display_utils ***
+        # Show side-by-side metrics
         st.write("## Extended Metrics Comparison")
         display_extended_metrics(ext_metrics_old, ext_metrics_new)
 
@@ -435,6 +443,7 @@ def main():
         display_instrument_weight_diff(df_instruments, col_tickers, final_w)
         display_class_weight_diff(df_instruments, col_tickers, asset_cls_list, final_w)
 
+        # Transaction cost
         final_val= sr_line.iloc[-1]
         cost_stats= compute_cost_impact(df_rebal, final_val)
         st.write("### Transaction Cost Impact")
@@ -479,7 +488,8 @@ def main():
         st.write("### Max Drawdown Comparison")
         st.dataframe(df_dd_comp.style.format("{:.2%}"))
 
-        # if Markowitz => 12-month frontier
+        # If Markowitz => 12-month frontier
+        frontier_df = pd.DataFrame()  # If you want to store the frontier
         if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
             st.write("### 12-Month Final Frontier")
             fvol, fret= compute_efficient_frontier_12m(
@@ -503,6 +513,9 @@ def main():
             if len(fvol)==0:
                 st.warning("No feasible 12-month frontier.")
             else:
+                # Store them in a DF if we want to export
+                frontier_df = pd.DataFrame({"Vol": fvol, "Return": fret})
+
                 if len(df_sub)>252:
                     df_12m= df_sub.iloc[-252:].copy()
                 else:
@@ -540,6 +553,22 @@ def main():
                     title="12-Month Frontier: Old vs New"
                 )
                 st.plotly_chart(figf)
+
+        # FINALLY => Provide an Excel Download
+        excel_bytes = export_backtest_results_to_excel(
+            sr_line_new=sr_line,
+            sr_line_old=old_line_u,
+            df_rebal=df_rebal,
+            ext_metrics_new=ext_metrics_new,
+            ext_metrics_old=ext_metrics_old
+        )
+
+        st.download_button(
+            label="Download Backtest Excel",
+            data=excel_bytes,
+            file_name="backtest_results.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     else:
         # "Hyperparameter Optimization"
