@@ -1,5 +1,3 @@
-# File: rolling_bayesian.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,10 +12,11 @@ from skopt.learning.gaussian_process.kernels import (
 )
 
 # Hypothetical helper that executes a single combination of hyperparams
-# for param vs direct approach, etc. Make sure you have the correct import:
-# from modules.backtesting.rolling_gridsearch import run_one_combo
+# for param vs direct approach, etc.
 from modules.backtesting.rolling_gridsearch import run_one_combo
 
+# Import your minimal HMM for regime detection
+from modules.regime_detection.hmm_regime import HMMRegimeDetector
 
 def rolling_bayesian_optimization(
     df_prices: pd.DataFrame,
@@ -32,16 +31,69 @@ def rolling_bayesian_optimization(
     trade_buffer_pct: float
 ) -> pd.DataFrame:
     """
-    Bayesian Optimization with a user-configurable Gaussian Process (GP) as the surrogate.
+    Bayesian Optimization extended with an optional "Online" approach:
+      - If user picks "Online", we run HMM-based regime detection first,
+        display the current regime, then proceed to normal Bayesian steps.
+      - If user picks "Manual", we skip HMM and directly do the normal routine.
+
+    Returns a DataFrame of tried hyperparam combos and their Sharpe.
     """
 
     st.write("## Bayesian Optimization")
 
-    # -------------------------------------------
-    # 1) Choose solver approach: param or direct
-    # -------------------------------------------
+    # ------------------------------------------------------------------
+    # 0) Approach => "Manual" or "Online" (which triggers HMM)
+    # ------------------------------------------------------------------
+    approach_choice = st.radio(
+        "Bayesian Approach:",
+        ["Manual", "Online (HMM)"],
+        index=0
+    )
+
+    current_regime = None  # We'll store the predicted regime here if online
+
+    if approach_choice == "Online (HMM)":
+        st.write("### 1) Regime Detection via HMM")
+
+        # 1) Let user specify how many hidden states, window for vol, etc.
+        hmm_n_states = st.number_input("Number of hidden states", 2, 5, 2, step=1)
+        hmm_window = st.number_input("Rolling window for volatility", 5, 252, 20, step=5)
+
+        # 2) Choose how big a subset of df_prices we use for detection
+        #    e.g., the last 252 days of an index column in df_prices
+        regime_column = st.selectbox("Column for regime detection", df_prices.columns)
+        lookback_days = st.number_input("HMM lookback (days)", 30, 2000, 252, step=10)
+
+        # Subset df_prices => last `lookback_days` of the selected column
+        if len(df_prices) < lookback_days:
+            st.warning("Not enough data for the requested HMM lookback. Using entire data.")
+            df_sub = df_prices[regime_column]
+        else:
+            df_sub = df_prices[regime_column].iloc[-lookback_days:].copy()
+
+        # 3) Fit HMM
+        if st.button("Run HMM Detection"):
+            with st.spinner("Fitting HMM..."):
+                hmm_detector = HMMRegimeDetector(
+                    n_states=hmm_n_states,
+                    window_vol=hmm_window,
+                    random_state=42
+                )
+                states, current_regime = hmm_detector.fit_predict(df_sub)
+
+            st.success(f"HMM done! Current regime => State {current_regime}")
+
+            # Optionally see means
+            if st.checkbox("Show HMM state stats?"):
+                hmm_detector.print_state_stats()
+
+        st.write("---")
+
+    # ------------------------------------------------------------------
+    # 1) Choose solver approach => param vs direct
+    # ------------------------------------------------------------------
     solver_choice = st.radio(
-        "Solver Approach for Bayesian?",
+        "Solver Approach for Bayesian? (cvxpy-based):",
         ["Parametric (cvxpy)", "Direct (cvxpy)"],
         index=0
     )
@@ -67,9 +119,9 @@ def rolling_bayesian_optimization(
     else:
         n_points_space = None
 
-    # -------------------------------------------
+    # ------------------------------------------------------------------
     # 2) The rest of param ranges: alpha, beta, etc.
-    # -------------------------------------------
+    # ------------------------------------------------------------------
     st.write("### Hyperparameter Ranges")
 
     alpha_min = st.slider("Alpha min (mean shrink)", 0.0, 1.0, 0.0, 0.05)
@@ -124,9 +176,9 @@ def rolling_bayesian_optimization(
         progress_text.text(f"Progress: {pct}% complete. Elapsed: {elapsed:.1f}s")
         progress_bar.progress(pct)
 
-    # -------------------------------------------
+    # ------------------------------------------------------------------
     # 3) Define the objective function
-    # -------------------------------------------
+    # ------------------------------------------------------------------
     def objective(x):
         """
         If direct => x is [alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_].
@@ -201,9 +253,9 @@ def rolling_bayesian_optimization(
             tries_list.append({"params": x, "error": str(e)})
             return 1e9
 
-    # -------------------------------------------
+    # ------------------------------------------------------------------
     # 4) Expose GP configuration
-    # -------------------------------------------
+    # ------------------------------------------------------------------
     st.write("### Gaussian Process Settings")
 
     kernel_choice = st.selectbox("Select GP Kernel", ["Matern", "RBF", "RationalQuadratic"], index=0)
@@ -213,7 +265,8 @@ def rolling_bayesian_optimization(
     default_nu = 2.5
     matern_nu = st.selectbox("Matern Nu (smoothness)", [0.5, 1.5, 2.5], index=2)
 
-    alpha_val = st.number_input("GP alpha (noise)", min_value=1e-9, max_value=1.0, value=0.01, step=0.01, format="%.6f")
+    alpha_val = st.number_input("GP alpha (noise)", min_value=1e-9, max_value=1.0, value=0.01,
+                                step=0.01, format="%.6f")
     normalize_y = st.checkbox("Normalize GP outputs (Sharpe)?", value=True)
 
     # Build the chosen kernel
@@ -222,7 +275,6 @@ def rolling_bayesian_optimization(
     elif kernel_choice == "RationalQuadratic":
         chosen_kernel = RationalQuadratic(length_scale=length_scale_init, alpha=1.0)
     else:  # "RBF"
-        from skopt.learning.gaussian_process.kernels import RBF
         chosen_kernel = RBF(length_scale=length_scale_init)
 
     # Create the custom GP
@@ -233,10 +285,11 @@ def rolling_bayesian_optimization(
         random_state=42
     )
 
-    # -------------------------------------------
+    # ------------------------------------------------------------------
     # 5) Actually run the Bayesian search
-    # -------------------------------------------
+    # ------------------------------------------------------------------
     if not st.button("Run Bayesian Optimization"):
+        # If the user hasn’t clicked => return empty
         return pd.DataFrame()
 
     with st.spinner("Running Bayesian optimization..."):
