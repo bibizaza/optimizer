@@ -1,3 +1,10 @@
+"""
+File: modules/backtesting/rolling_bayesian.py
+
+Implements a rolling Bayesian optimization approach with an optional
+Online(HMM) approach that automatically aggregates *all* columns in df_prices.
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,16 +14,14 @@ import time
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 from skopt.learning import GaussianProcessRegressor
-from skopt.learning.gaussian_process.kernels import (
-    RBF, Matern, RationalQuadratic
-)
+from skopt.learning.gaussian_process.kernels import (RBF, Matern, RationalQuadratic)
 
-# Hypothetical helper that executes a single combination of hyperparams
-# for param vs direct approach, etc.
+# Your helper that runs a single combination
 from modules.backtesting.rolling_gridsearch import run_one_combo
 
-# Import your minimal HMM for regime detection
-from modules.regime_detection.hmm_regime import HMMRegimeDetector
+# The aggregator-based HMM approach
+from modules.regime_detection.hmm_aggregator import AggregatedHMMRegimeManager
+
 
 def rolling_bayesian_optimization(
     df_prices: pd.DataFrame,
@@ -31,67 +36,69 @@ def rolling_bayesian_optimization(
     trade_buffer_pct: float
 ) -> pd.DataFrame:
     """
-    Bayesian Optimization extended with an optional "Online" approach:
-      - If user picks "Online", we run HMM-based regime detection first,
-        display the current regime, then proceed to normal Bayesian steps.
-      - If user picks "Manual", we skip HMM and directly do the normal routine.
+    Bayesian Optimization extended with an optional "Online(HMM)" approach:
+      - If user picks "Online(HMM)", we run HMM aggregator on *all* columns 
+        in df_prices to detect regime, then proceed with normal Bayesian steps.
+      - If user picks "Manual", skip HMM and do a standard approach.
 
     Returns a DataFrame of tried hyperparam combos and their Sharpe.
     """
 
     st.write("## Bayesian Optimization")
 
-    # ------------------------------------------------------------------
-    # 0) Approach => "Manual" or "Online" (which triggers HMM)
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # 0) Approach => "Manual" or "Online(HMM)"
+    # -----------------------------------------------------
     approach_choice = st.radio(
         "Bayesian Approach:",
-        ["Manual", "Online (HMM)"],
+        ["Manual", "Online(HMM)"],
         index=0
     )
 
-    current_regime = None  # We'll store the predicted regime here if online
+    current_regime = None
 
-    if approach_choice == "Online (HMM)":
-        st.write("### 1) Regime Detection via HMM")
+    if approach_choice == "Online(HMM)":
+        st.write("### HMM-Based Regime Detection (Aggregate All Instruments)")
 
-        # 1) Let user specify how many hidden states, window for vol, etc.
+        # 1) Let user pick # states, rolling vol window, eq vs old weighting
         hmm_n_states = st.number_input("Number of hidden states", 2, 5, 2, step=1)
-        hmm_window = st.number_input("Rolling window for volatility", 5, 252, 20, step=5)
+        hmm_window   = st.number_input("Rolling window for HMM vol", 5, 252, 20, step=5)
+        eq_weighting = st.checkbox("Use equal weighting across all instruments?", value=True)
 
-        # 2) Choose how big a subset of df_prices we use for detection
-        #    e.g., the last 252 days of an index column in df_prices
-        regime_column = st.selectbox("Column for regime detection", df_prices.columns)
-        lookback_days = st.number_input("HMM lookback (days)", 30, 2000, 252, step=10)
-
-        # Subset df_prices => last `lookback_days` of the selected column
-        if len(df_prices) < lookback_days:
-            st.warning("Not enough data for the requested HMM lookback. Using entire data.")
-            df_sub = df_prices[regime_column]
+        # Subset last X days
+        hmm_lookback_days = st.number_input("HMM lookback (days)", 30, 2000, 252, step=10)
+        if len(df_prices) > hmm_lookback_days:
+            df_hmm = df_prices.iloc[-hmm_lookback_days:].copy()
         else:
-            df_sub = df_prices[regime_column].iloc[-lookback_days:].copy()
+            df_hmm = df_prices.copy()
 
-        # 3) Fit HMM
-        if st.button("Run HMM Detection"):
-            with st.spinner("Fitting HMM..."):
-                hmm_detector = HMMRegimeDetector(
+        # 2) Button to run aggregator detection
+        if st.button("Run Aggregated HMM"):
+            with st.spinner("Fitting Aggregated HMM..."):
+                agg_manager = AggregatedHMMRegimeManager(
                     n_states=hmm_n_states,
                     window_vol=hmm_window,
-                    random_state=42
+                    random_state=42,
+                    use_equal_weights=eq_weighting
                 )
-                states, current_regime = hmm_detector.fit_predict(df_sub)
+                states, current_regime = agg_manager.fit_predict(
+                    df_prices=df_hmm, 
+                    df_instruments=df_instruments
+                )
 
-            st.success(f"HMM done! Current regime => State {current_regime}")
-
-            # Optionally see means
-            if st.checkbox("Show HMM state stats?"):
-                hmm_detector.print_state_stats()
+            if states.size > 0:
+                st.success(f"Done. Current regime => State {current_regime}")
+                if st.checkbox("Show HMM state stats?"):
+                    agg_manager.print_state_stats()
+            else:
+                st.warning("No data for aggregator => states are empty.")
 
         st.write("---")
 
-    # ------------------------------------------------------------------
+
+    # -----------------------------------------------------
     # 1) Choose solver approach => param vs direct
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
     solver_choice = st.radio(
         "Solver Approach for Bayesian? (cvxpy-based):",
         ["Parametric (cvxpy)", "Direct (cvxpy)"],
@@ -99,13 +106,12 @@ def rolling_bayesian_optimization(
     )
     use_direct_solver = (solver_choice == "Direct (cvxpy)")
 
-    # # of Bayesian evaluations
     n_calls = st.number_input("Number of Bayesian evaluations (n_calls)", 5, 500, 20, step=5)
 
-    # If param => let user specify frontier n_points or range
+    # If param => let user specify n_points or range
     if not use_direct_solver:
         st.write("### Efficient Frontier Points Option")
-        points_option = st.radio("Select how to pick n_points:", ["Range", "Fixed"], index=0)
+        points_option = st.radio("Frontier n_points approach:", ["Range", "Fixed"], index=0)
         if points_option == "Fixed":
             fixed_points = st.number_input("Frontier n_points", 1, 999, 50, step=1)
             n_points_space = Categorical([fixed_points], name="n_points")
@@ -119,9 +125,9 @@ def rolling_bayesian_optimization(
     else:
         n_points_space = None
 
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
     # 2) The rest of param ranges: alpha, beta, etc.
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
     st.write("### Hyperparameter Ranges")
 
     alpha_min = st.slider("Alpha min (mean shrink)", 0.0, 1.0, 0.0, 0.05)
@@ -130,59 +136,52 @@ def rolling_bayesian_optimization(
     beta_min = st.slider("Beta min (cov shrink)", 0.0, 1.0, 0.0, 0.05)
     beta_max = st.slider("Beta max (cov shrink)", 0.0, 1.0, 1.0, 0.05)
 
-    freq_choices = st.multiselect("Possible Rebal Frequencies (months)", [1, 3, 6], default=[1, 3, 6])
+    freq_choices = st.multiselect("Possible Rebal Frequencies (months)", [1, 3, 6], default=[1,3,6])
     if not freq_choices:
         freq_choices = [1]
 
-    lb_choices = st.multiselect("Possible Lookback Windows (months)", [3, 6, 12], default=[3, 6, 12])
+    lb_choices = st.multiselect("Possible Lookback Windows (months)", [3,6,12], default=[3,6,12])
     if not lb_choices:
         lb_choices = [3]
 
     st.write("### EWM Covariance")
-    ewm_bool_choices = st.multiselect("Use EWM Cov?", [False, True], default=[False, True])
+    ewm_bool_choices = st.multiselect("Use EWM Cov?", [False, True], default=[False,True])
     if not ewm_bool_choices:
         ewm_bool_choices = [False]
 
-    ewm_alpha_min = st.slider("EWM alpha min", 0.0, 1.0, 0.0, 0.05)
-    ewm_alpha_max = st.slider("EWM alpha max", 0.0, 1.0, 1.0, 0.05)
+    ewm_alpha_min = st.slider("EWM alpha min", 0.0,1.0,0.0,0.05)
+    ewm_alpha_max = st.slider("EWM alpha max", 0.0,1.0,1.0,0.05)
 
-    # The base dimension list
-    space_common = [
-        Real(alpha_min, alpha_max, name="alpha_"),
-        Real(beta_min, beta_max,   name="beta_"),
-        Categorical(freq_choices,  name="freq_"),
-        Categorical(lb_choices,    name="lb_"),
-        Categorical(ewm_bool_choices, name="do_ewm_"),
-        Real(ewm_alpha_min, ewm_alpha_max, name="ewm_alpha_")
-    ]
     if use_direct_solver:
-        # Direct => no n_points in dimension
-        space = space_common
+        space = [
+            Real(alpha_min, alpha_max, name="alpha_"),
+            Real(beta_min,  beta_max,  name="beta_"),
+            Categorical(freq_choices,  name="freq_"),
+            Categorical(lb_choices,    name="lb_"),
+            Categorical(ewm_bool_choices, name="do_ewm_"),
+            Real(ewm_alpha_min, ewm_alpha_max, name="ewm_alpha_")
+        ]
     else:
-        space = [n_points_space] + space_common
+        # param => include n_points
+        space = [
+            n_points_space,
+            Real(alpha_min, alpha_max, name="alpha_"),
+            Real(beta_min,  beta_max,  name="beta_"),
+            Categorical(freq_choices,  name="freq_"),
+            Categorical(lb_choices,    name="lb_"),
+            Categorical(ewm_bool_choices, name="do_ewm_"),
+            Real(ewm_alpha_min, ewm_alpha_max, name="ewm_alpha_")
+        ]
 
-    # We'll store partial results here
     tries_list = []
 
-    # For progress
-    progress_bar = st.progress(0)
-    progress_text = st.empty()
-    start_time = time.time()
-
-    def on_step(res):
-        done = len(res.x_iters)
-        pct = int(done * 100 / n_calls)
-        elapsed = time.time() - start_time
-        progress_text.text(f"Progress: {pct}% complete. Elapsed: {elapsed:.1f}s")
-        progress_bar.progress(pct)
-
-    # ------------------------------------------------------------------
-    # 3) Define the objective function
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # 3) The objective function
+    # -----------------------------------------------------
     def objective(x):
         """
-        If direct => x is [alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_].
-        If param => x is [n_points_, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_].
+        If direct => x => [alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_].
+        If param => x => [n_points_, alpha_, beta_, freq_, lb_, do_ewm_, ewm_alpha_].
         """
         try:
             if use_direct_solver:
@@ -202,12 +201,12 @@ def rolling_bayesian_optimization(
                 do_ewm_    = x[5]
                 ewm_alpha_ = x[6]
 
-            # clamp ewm_alpha if do_ewm_ is True
-            if do_ewm_:
-                if ewm_alpha_ <= 0: ewm_alpha_ = 1e-6
-                if ewm_alpha_ > 1:  ewm_alpha_ = 1.0
+            # clamp if needed
+            if do_ewm_ and (ewm_alpha_ <= 0):
+                ewm_alpha_ = 1e-6
+            elif do_ewm_ and (ewm_alpha_ > 1):
+                ewm_alpha_ = 1.0
 
-            # Run a single combo of hyperparams
             result_dict = run_one_combo(
                 df_prices=df_prices,
                 df_instruments=df_instruments,
@@ -247,37 +246,47 @@ def rolling_bayesian_optimization(
 
             if np.isnan(sr_val) or np.isinf(sr_val):
                 return 1e9
-            return -sr_val  # we minimize negative SR => maximize SR
+            return -sr_val
+
         except Exception as e:
-            st.error(f"Error in objective with params {x}: {e}")
+            st.error(f"Error in objective => {x}: {e}")
             tries_list.append({"params": x, "error": str(e)})
             return 1e9
 
-    # ------------------------------------------------------------------
-    # 4) Expose GP configuration
-    # ------------------------------------------------------------------
+    # For progress
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
+    start_time = time.time()
+
+    def on_step(res):
+        done = len(res.x_iters)
+        pct = int(done * 100 / n_calls)
+        elapsed = time.time() - start_time
+        progress_text.text(f"Progress: {pct}% complete. Elapsed: {elapsed:.1f}s")
+        progress_bar.progress(pct)
+
+    # -----------------------------------------------------
+    # 4) GP config
+    # -----------------------------------------------------
     st.write("### Gaussian Process Settings")
 
-    kernel_choice = st.selectbox("Select GP Kernel", ["Matern", "RBF", "RationalQuadratic"], index=0)
-    length_scale_init = st.slider("Kernel length_scale", 0.1, 10.0, 1.0, 0.1)
+    kernel_choice = st.selectbox("Select GP Kernel", ["Matern","RBF","RationalQuadratic"], index=0)
+    length_scale_init = st.slider("Kernel length_scale", 0.1,10.0,1.0,0.1)
 
-    # If Matern => let user pick nu
-    default_nu = 2.5
-    matern_nu = st.selectbox("Matern Nu (smoothness)", [0.5, 1.5, 2.5], index=2)
+    # Matern => user picks nu
+    matern_nu = st.selectbox("Matern Nu", [0.5, 1.5, 2.5], index=2)
 
     alpha_val = st.number_input("GP alpha (noise)", min_value=1e-9, max_value=1.0, value=0.01,
                                 step=0.01, format="%.6f")
     normalize_y = st.checkbox("Normalize GP outputs (Sharpe)?", value=True)
 
-    # Build the chosen kernel
     if kernel_choice == "Matern":
         chosen_kernel = Matern(length_scale=length_scale_init, nu=matern_nu)
     elif kernel_choice == "RationalQuadratic":
         chosen_kernel = RationalQuadratic(length_scale=length_scale_init, alpha=1.0)
-    else:  # "RBF"
+    else:
         chosen_kernel = RBF(length_scale=length_scale_init)
 
-    # Create the custom GP
     gp_model = GaussianProcessRegressor(
         kernel=chosen_kernel,
         alpha=alpha_val,
@@ -285,27 +294,24 @@ def rolling_bayesian_optimization(
         random_state=42
     )
 
-    # ------------------------------------------------------------------
-    # 5) Actually run the Bayesian search
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------
+    # 5) Run Bayesian if user wants
+    # -----------------------------------------------------
     if not st.button("Run Bayesian Optimization"):
-        # If the user hasn’t clicked => return empty
         return pd.DataFrame()
 
     with st.spinner("Running Bayesian optimization..."):
         res = gp_minimize(
             func=objective,
             dimensions=space,
-            base_estimator=gp_model,  # <--- the GP
+            base_estimator=gp_model,
             n_calls=n_calls,
             random_state=42,
             callback=[on_step]
         )
 
-    # Prepare final results
     df_out = pd.DataFrame(tries_list)
     if not df_out.empty:
-        # Show best combo
         best_ = df_out.sort_values("Sharpe Ratio", ascending=False).iloc[0]
         st.write("**Best Found** =>", dict(best_))
         st.dataframe(df_out)
