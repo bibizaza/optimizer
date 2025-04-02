@@ -12,6 +12,7 @@ from skopt.space import Integer, Real, Categorical
 from modules.data_loading.excel_loader import parse_excel
 from modules.analytics.constraints import get_main_constraints
 
+# Rolling monthly logic => 4 approaches
 from modules.backtesting.rolling_monthly import (
     rolling_backtest_monthly_param_sharpe,
     rolling_backtest_monthly_direct_sharpe,
@@ -34,11 +35,6 @@ from modules.analytics.extended_metrics import compute_extended_metrics
 
 # For multi-port metrics side-by-side
 def display_multi_portfolio_metrics(metrics_map: dict):
-    """
-    metrics_map = { "Optimized": {...}, "Old Drift": {...}, "Old Strategic": {...}, ... }
-    We'll display 3 sections: Performance, Risk, Ratios,
-    with one column per portfolio.
-    """
     performance_keys= ["Total Return","Annual Return","Annual Vol","Sharpe"]
     risk_keys       = ["MaxDD","TimeToRecovery","VaR_1M99","CVaR_1M99"]
     ratio_keys      = ["Skew","Kurtosis","Sortino","Calmar","Omega"]
@@ -83,8 +79,33 @@ def display_multi_portfolio_metrics(metrics_map: dict):
 # Excel export
 from modules.export.export_backtest_to_excel import export_backtest_results_to_excel
 
+# We'll import compute_drawdown_series from your max_drawdown module
+from modules.backtesting.max_drawdown import compute_drawdown_series
 
-###############################################################################
+def plot_multi_drawdown(df_absolute: pd.DataFrame):
+    """
+    For each column in df_absolute, compute its drawdown series, and plot them all in one chart.
+    """
+    if df_absolute.empty:
+        return None
+
+    dd_map = {}
+    for c in df_absolute.columns:
+        dd_map[c+" (DD)"] = compute_drawdown_series(df_absolute[c])
+
+    df_dd = pd.DataFrame(dd_map, index=df_absolute.index)
+    import plotly.express as px
+    fig = px.line(
+        df_dd,
+        x=df_dd.index,
+        y=df_dd.columns,
+        title="Historical Drawdown Over Time (Multiple)",
+        labels={"value":"Drawdown","index":"Date","variable":"Portfolio"}
+    )
+    fig.update_yaxes(tickformat=".2%")
+    return fig
+
+
 def sidebar_data_and_constraints():
     st.sidebar.title("Data Loading")
     approach_data = st.sidebar.radio(
@@ -130,7 +151,6 @@ def sidebar_data_and_constraints():
 
     return df_instruments, df_prices, coverage, main_constr
 
-
 def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     df_prices = df_prices.copy()
     coverage = df_prices.notna().sum(axis=1)
@@ -145,7 +165,7 @@ def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
 
 
 def main():
-    st.title("Optimize + Extended Metrics + Interval Analysis")
+    st.title("Optimize + Extended Metrics + Interval + Multi-Drawdown")
 
     df_instruments, df_prices, coverage, main_constr = sidebar_data_and_constraints()
     if df_instruments.empty or df_prices.empty or not main_constr:
@@ -193,7 +213,7 @@ def main():
             lookback_m = st.selectbox("Lookback Window (months)", [3,6,12], index=0)
             window_days = lookback_m*21
 
-            # default inits
+            # Markowitz or CVaR inits
             reg_cov, do_ledoitwolf, do_ewm = False, False, False
             ewm_alpha= 0.0
             do_shrink_means, alpha_shrink = False, 0.0
@@ -216,8 +236,8 @@ def main():
                 do_shrink_cov   = st.checkbox("Shrink Cov (diagonal)?", True)
                 beta_shrink     = st.slider("Beta (for cov)", 0.0,1.0,0.2,0.01)
 
-                if solver_choice == "Parametric (Markowitz)":
-                    n_points_man = st.number_input("Frontier #points (Param Only)", 5,100,15, step=5)
+                if solver_choice=="Parametric (Markowitz)":
+                    n_points_man= st.number_input("Frontier #points (Param Only)", 5,100,15, step=5)
             else:
                 cvar_alpha_in= st.slider("CVaR alpha", 0.0,0.9999,0.95,0.01)
                 cvar_limit_in= st.slider("CVaR limit (Direct approach)", 0.0,1.0,0.10,0.01)
@@ -226,7 +246,7 @@ def main():
             run_rolling = st.button("Run Rolling")
 
         if run_rolling:
-            # 1) build ticker arrays
+            # Build arrays
             col_tickers = df_sub.columns.tolist()
             have_sec = ("#Security_Type" in df_instruments.columns)
             asset_cls_list= []
@@ -247,8 +267,8 @@ def main():
             # define solver callables
             def param_sharpe_fn(sub_ret: pd.DataFrame):
                 from modules.optimization.cvxpy_parametric import parametric_max_sharpe_aclass_subtype
-                w_opt, summary= parametric_max_sharpe_aclass_subtype(
-                    df_returns=sub_ret,
+                w_opt, summary = parametric_max_sharpe_aclass_subtype(
+                    df_returns= sub_ret,
                     tickers= col_tickers,
                     asset_classes= asset_cls_list,
                     security_types= sec_type_list,
@@ -305,7 +325,7 @@ def main():
                     daily_rf= daily_rf,
                     freq_choice= cvar_freq_user,
                     clamp_factor=1.5,
-                    max_weight_each=1.0,
+                    max_weight_each= 1.0,
                     max_iter=10
                 )
                 return w_opt, summary
@@ -327,7 +347,7 @@ def main():
                 )
                 return w_opt, summary
 
-            # 2) run the chosen approach
+            # run rolling
             if solver_choice=="Parametric (Markowitz)":
                 sr_opt, final_w, _, _, df_rebal, extm_opt = rolling_backtest_monthly_param_sharpe(
                     df_prices= df_sub,
@@ -386,32 +406,32 @@ def main():
                     daily_rf= daily_rf
                 )
 
-            extm_opt = extm_opt or {}
+            extm_opt= extm_opt or {}
 
-            # 3) Old Drift
-            sr_drift = pd.Series(dtype=float)
+            # build old drift
+            sr_drift= pd.Series(dtype=float)
             extm_drift= {}
             if "#Quantity" in df_instruments.columns:
                 qty_map= {}
                 for _, row in df_instruments.iterrows():
                     qty_map[row["#ID"]]= row["#Quantity"]
                 if qty_map:
-                    sr_drift = backtest_buy_and_hold_that_drifts(
-                        df_prices=df_sub,
-                        start_date=df_sub.index[0],
-                        end_date=df_sub.index[-1],
+                    sr_drift= backtest_buy_and_hold_that_drifts(
+                        df_prices= df_sub,
+                        start_date= df_sub.index[0],
+                        end_date= df_sub.index[-1],
                         ticker_qty= qty_map
                     )
                     if not sr_drift.empty:
                         extm_drift= compute_extended_metrics(sr_drift, daily_rf=daily_rf)
 
-            # 4) Old Strategic
+            # old strategic
             sr_strat= pd.Series(dtype=float)
             extm_strat= {}
             if "Weight_Old" in df_instruments.columns:
                 w_map= {}
                 for _, row in df_instruments.iterrows():
-                    w_map[row["#ID"]] = row["Weight_Old"]
+                    w_map[row["#ID"]]= row["Weight_Old"]
                 arr_=[]
                 for c in df_sub.columns:
                     arr_.append(w_map.get(c,0.0))
@@ -420,9 +440,9 @@ def main():
                 if s_>1e-9:
                     arr_/= s_
                     sr_strat= backtest_strategic_rebalanced(
-                        df_prices=df_sub,
-                        start_date=df_sub.index[0],
-                        end_date=df_sub.index[-1],
+                        df_prices= df_sub,
+                        start_date= df_sub.index[0],
+                        end_date= df_sub.index[-1],
                         strategic_weights= arr_,
                         months_interval=12,
                         transaction_cost_value= transaction_cost_val,
@@ -432,7 +452,6 @@ def main():
                     if not sr_strat.empty:
                         extm_strat= compute_extended_metrics(sr_strat, daily_rf=daily_rf)
 
-            # store
             st.session_state["results"]= {
                 "sr_opt": sr_opt,
                 "extm_opt": extm_opt,
@@ -443,7 +462,7 @@ def main():
                 "df_rebal": df_rebal
             }
 
-        # Display
+        # show results
         if "results" in st.session_state:
             r_ = st.session_state["results"]
             sr_opt    = r_["sr_opt"]
@@ -455,28 +474,27 @@ def main():
             df_rebal  = r_["df_rebal"]
 
             st.write("## Rolling Backtest Comparison")
-
+            # checkboxes
             show_opt   = st.checkbox("Optimized",   value=(not sr_opt.empty))
             show_drift = st.checkbox("Old Drift",   value=(not sr_drift.empty))
             show_strat = st.checkbox("Old Strategic", value=(not sr_strat.empty))
 
-            # (A) Cumulative Chart
+            # (A) line chart
             df_plot= pd.DataFrame()
             if show_opt and not sr_opt.empty:
                 df_plot["Optimized"] = sr_opt/sr_opt.iloc[0]-1
             if show_drift and not sr_drift.empty:
-                df_plot["OldDrift"]  = sr_drift/sr_drift.iloc[0]-1
+                df_plot["Old Drift"] = sr_drift/sr_drift.iloc[0]-1
             if show_strat and not sr_strat.empty:
-                df_plot["OldStrat"]  = sr_strat/sr_strat.iloc[0]-1
+                df_plot["Old Strat"] = sr_strat/sr_strat.iloc[0]-1
 
             if not df_plot.empty:
-                st.line_chart(df_plot*100.)
+                st.line_chart(df_plot*100)
             else:
                 st.warning("No lines selected for chart.")
 
-            # (B) Extended Metrics for the portfolios that are selected
-            # Build a metrics_map: { name -> dict_of_metrics }
-            metrics_map = {}
+            # (B) extended metrics
+            metrics_map= {}
             if show_opt and not sr_opt.empty:
                 metrics_map["Optimized"] = extm_opt
             if show_drift and not sr_drift.empty:
@@ -494,13 +512,12 @@ def main():
             if not df_rebal.empty and "Date" in df_rebal.columns:
                 rebal_dates= df_rebal["Date"].unique().tolist()
                 rebal_dates.sort()
-                # add first & last if needed
+                # add first & last
                 if len(rebal_dates)<1 or rebal_dates[0]> sr_opt.index[0]:
                     rebal_dates= [sr_opt.index[0]]+ rebal_dates
                 if rebal_dates[-1]< sr_opt.index[-1]:
                     rebal_dates.append(sr_opt.index[-1])
 
-            # Build a portfolio_map with whichever are selected
             portfolio_map={}
             if show_opt and not sr_opt.empty:
                 portfolio_map["Optimized"] = sr_opt
@@ -510,12 +527,8 @@ def main():
                 portfolio_map["Old Strategic"] = sr_strat
 
             if len(rebal_dates)<2 or len(portfolio_map)<2:
-                st.info("Insufficient rebal dates or less than 2 portfolios => no interval analysis.")
+                st.info("Insufficient rebal dates or <2 portfolios => skip interval analysis.")
             else:
-                # 1) Multi-Portfolio interval bar
-                from modules.backtesting.rolling_intervals import (
-                    compute_multi_interval_returns, plot_multi_interval_bars
-                )
                 df_multi = compute_multi_interval_returns(portfolio_map, rebal_dates)
                 if df_multi.empty:
                     st.warning("No intervals computed.")
@@ -524,23 +537,39 @@ def main():
                     if fig_ is not None:
                         st.plotly_chart(fig_)
 
-                # 2) Pairwise difference in user-specified direction
-                from modules.backtesting.rolling_intervals import compute_predefined_pairs_diff_stats
-                df_pairs = compute_predefined_pairs_diff_stats(portfolio_map, rebal_dates)
+                df_pairs= compute_predefined_pairs_diff_stats(portfolio_map, rebal_dates)
                 if df_pairs.empty:
                     st.info("No pairwise stats because we don't have the needed pairs.")
                 else:
                     st.write("### Pairwise Interval Stats (User-Defined Directions)")
                     st.dataframe(df_pairs)
 
-            # (D) Transaction Cost for optimized only
+            # (D) Transaction Cost (Optimized only)
             if not df_rebal.empty and not sr_opt.empty:
                 final_val= sr_opt.iloc[-1]
                 cost_stats= compute_cost_impact(df_rebal, final_val)
                 st.write("### Transaction Cost Impact (Optimized Only)")
                 st.dataframe(pd.DataFrame([cost_stats]))
 
-            # (E) Excel Export example
+            # (E) Multi-Drawdown Chart
+            st.write("## Drawdown Over Time (Selected Portfolios)")
+            df_dd_plot= pd.DataFrame()
+            # We'll store the absolute *rolling values* not returns, so we pass sr_opt, sr_drift, sr_strat.
+            if show_opt and not sr_opt.empty:
+                df_dd_plot["Optimized"] = sr_opt
+            if show_drift and not sr_drift.empty:
+                df_dd_plot["Old Drift"] = sr_drift
+            if show_strat and not sr_strat.empty:
+                df_dd_plot["Old Strategic"] = sr_strat
+
+            if df_dd_plot.empty:
+                st.warning("No portfolios selected for drawdown.")
+            else:
+                fig_dd = plot_multi_drawdown(df_dd_plot)
+                if fig_dd is not None:
+                    st.plotly_chart(fig_dd)
+
+            # (F) Excel Export
             excel_bytes= export_backtest_results_to_excel(
                 sr_line_new= sr_opt,
                 sr_line_old= sr_drift,
@@ -548,10 +577,12 @@ def main():
                 ext_metrics_new= extm_opt,
                 ext_metrics_old= extm_drift
             )
-            st.download_button("Download Backtest Excel",
-                               data= excel_bytes,
-                               file_name="backtest_results.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(
+                "Download Backtest Excel",
+                data=excel_bytes,
+                file_name="backtest_results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     else:
         st.write("Hyperparameter Optimization placeholder.")
