@@ -8,6 +8,7 @@ from dateutil.relativedelta import relativedelta
 from skopt import gp_minimize
 from skopt.space import Integer, Real, Categorical
 
+# Data loading & constraints
 from modules.data_loading.excel_loader import parse_excel
 from modules.analytics.constraints import get_main_constraints
 
@@ -35,32 +36,60 @@ from modules.analytics.extended_metrics import compute_extended_metrics
 # Excel export
 from modules.export.export_backtest_to_excel import export_backtest_results_to_excel
 
-# Drawdown
+# Drawdown logic
 from modules.backtesting.max_drawdown import compute_drawdown_series
 import plotly.express as px
 
 ###############################################################################
-# Helper: compute final aclass weights
+# Final weighting helpers
 ###############################################################################
 def compute_final_aclass_weights(
     shares: np.ndarray,
     df_prices: pd.DataFrame,
     asset_cls_list: list[str]
 ) -> pd.Series:
+    """
+    For the final day in df_prices, multiply shares by prices, sum => total,
+    and produce fraction by asset class.
+    """
     if shares is None or len(shares)==0 or df_prices.empty:
         return pd.Series(dtype=float)
 
     last_day = df_prices.index[-1]
-    px_last = df_prices.loc[last_day].fillna(0.0).values
+    px_last  = df_prices.loc[last_day].fillna(0.0).values
     vals = shares * px_last
-    tot_val= vals.sum()
-    if tot_val<=1e-9:
+    total_val = vals.sum()
+    if total_val <= 1e-9:
         return pd.Series(dtype=float)
 
-    df_ = pd.DataFrame({"Aclass": asset_cls_list, "Value": vals})
-    group_ = df_.groupby("Aclass")["Value"].sum()
-    w_ = group_ / group_.sum()
+    df_map= pd.DataFrame({"Aclass": asset_cls_list, "Value": vals})
+    group_= df_map.groupby("Aclass")["Value"].sum()
+    w_= group_ / group_.sum()
     return w_
+
+def compute_final_instrument_weights(
+    shares: np.ndarray,
+    df_prices: pd.DataFrame
+) -> pd.Series:
+    """
+    Same idea, but at the ticker level instead of asset class.
+    We return a Series of final weight by ticker name.
+    """
+    if shares is None or len(shares)==0 or df_prices.empty:
+        return pd.Series(dtype=float)
+
+    last_day= df_prices.index[-1]
+    px_last= df_prices.loc[last_day].fillna(0.0).values
+    vals = shares * px_last
+    total_val= vals.sum()
+    if total_val<=1e-9:
+        return pd.Series(dtype=float)
+
+    # The df_prices.columns are the tickers
+    tickers= df_prices.columns
+    w_= vals / total_val
+    return pd.Series(data=w_, index=tickers)
+
 
 ###############################################################################
 # display multi-portfolio metrics
@@ -107,7 +136,9 @@ def display_multi_portfolio_metrics(metrics_map: dict):
     display_category("Risk",        risk_keys)
     display_category("Ratios",      ratio_keys)
 
-
+###############################################################################
+# drawdown
+###############################################################################
 def plot_multi_drawdown(df_absolute: pd.DataFrame):
     if df_absolute.empty:
         return None
@@ -126,7 +157,7 @@ def plot_multi_drawdown(df_absolute: pd.DataFrame):
     return fig
 
 ###############################################################################
-# sidebar
+# data loading & constraints
 ###############################################################################
 from modules.data_loading.excel_loader import parse_excel
 from modules.analytics.constraints import get_main_constraints
@@ -176,7 +207,6 @@ def sidebar_data_and_constraints():
 
     return df_instruments, df_prices, coverage, main_constr
 
-
 def clean_df_prices(df_prices: pd.DataFrame, coverage=0.8) -> pd.DataFrame:
     df_prices= df_prices.copy()
     c_ = df_prices.notna().sum(axis=1)
@@ -189,17 +219,18 @@ def clean_df_prices(df_prices: pd.DataFrame, coverage=0.8) -> pd.DataFrame:
     df_prices.fillna(method="bfill", inplace=True)
     return df_prices
 
-
 ###############################################################################
 # main
 ###############################################################################
 def main():
-    st.title("Full Example => Avoid Security_Type Mismatch + Show Aclass Weights")
+    st.title("Full Example => Instrument + Asset-Class Weights + No Mismatch")
 
+    # 1) Data & constraints
     df_instruments, df_prices, coverage, main_constr = sidebar_data_and_constraints()
     if df_instruments.empty or df_prices.empty or not main_constr:
         st.stop()
 
+    # 2) Clean data
     df_prices_clean= clean_df_prices(df_prices, coverage)
     user_start= main_constr["user_start"]
     df_sub= df_prices_clean.loc[pd.Timestamp(user_start):]
@@ -224,25 +255,26 @@ def main():
     else:
         df_instruments["Weight_Old"]= 0.0
 
-    # Always define col_tickers, asset_cls_list, sec_type_list OUTSIDE run_rolling
+    # define col_tickers & asset_cls_list & sec_type_list outside run_rolling
     df_sub= df_sub.sort_index()
     col_tickers= df_sub.columns.tolist()
     have_sec= ("#Security_Type" in df_instruments.columns)
 
     asset_cls_list= []
     sec_type_list= []
+
     for tk in col_tickers:
         row_= df_instruments[df_instruments["#ID"] == tk]
         if not row_.empty:
-            # read asset class
+            # asset class
             asset_cls_list.append(row_["#Asset_Class"].iloc[0])
-            # read security type if available
+            # security type
             if have_sec:
-                val_st= row_["#Security_Type"].iloc[0]
-                if pd.isna(val_st):
+                st_ = row_["#Security_Type"].iloc[0]
+                if pd.isna(st_):
                     sec_type_list.append("Unknown")
                 else:
-                    sec_type_list.append(val_st)
+                    sec_type_list.append(st_)
             else:
                 sec_type_list.append("Unknown")
         else:
@@ -273,9 +305,9 @@ def main():
             do_shrink_cov, beta_shrink= False, 0.0
             n_points_man=0
 
-            cvar_alpha_in=0.95
-            cvar_limit_in=0.10
-            cvar_freq_user="daily"
+            cvar_alpha_in= 0.95
+            cvar_limit_in= 0.10
+            cvar_freq_user= "daily"
 
             if solver_choice in ["Parametric (Markowitz)","Direct (Markowitz)"]:
                 reg_cov= st.checkbox("Regularize Cov?", False)
@@ -299,14 +331,14 @@ def main():
             run_rolling= st.button("Run Rolling")
 
         if run_rolling:
-            # define your solver callables
+            # define solver callables
             def param_sharpe_fn(sub_ret: pd.DataFrame):
                 from modules.optimization.cvxpy_parametric import parametric_max_sharpe_aclass_subtype
                 w_opt, summary= parametric_max_sharpe_aclass_subtype(
                     df_returns= sub_ret,
                     tickers= col_tickers,
                     asset_classes= asset_cls_list,
-                    security_types= sec_type_list,    # <==== pass real sec_type_list
+                    security_types= sec_type_list, # pass the real list
                     class_constraints= class_sum_constraints,
                     subtype_constraints= subtype_constraints,
                     daily_rf= daily_rf,
@@ -329,7 +361,7 @@ def main():
                     df_returns= sub_ret,
                     tickers= col_tickers,
                     asset_classes= asset_cls_list,
-                    security_types= sec_type_list,  # pass sec_type_list here
+                    security_types= sec_type_list,
                     class_constraints= class_sum_constraints,
                     subtype_constraints= subtype_constraints,
                     daily_rf= daily_rf,
@@ -382,9 +414,9 @@ def main():
                 )
                 return w_opt, summary
 
-            # actually run the chosen approach => 7 items
+            # run rolling => 7 items
             if solver_choice=="Parametric (Markowitz)":
-                sr_opt, final_w, final_sh, old_w_last, rebal_date_opt, df_rebal, extm_opt = \
+                sr_opt, final_w, final_sh_opt, old_w_last, final_rebal_date, df_rebal, extm_opt = \
                     rolling_backtest_monthly_param_sharpe(
                         df_prices= df_sub,
                         df_instruments= df_instruments,
@@ -399,7 +431,7 @@ def main():
                         daily_rf= daily_rf
                     )
             elif solver_choice=="Direct (Markowitz)":
-                sr_opt, final_w, final_sh, old_w_last, rebal_date_opt, df_rebal, extm_opt = \
+                sr_opt, final_w, final_sh_opt, old_w_last, final_rebal_date, df_rebal, extm_opt = \
                     rolling_backtest_monthly_direct_sharpe(
                         df_prices= df_sub,
                         df_instruments= df_instruments,
@@ -414,7 +446,7 @@ def main():
                         daily_rf= daily_rf
                     )
             elif solver_choice=="Parametric (CVaR)":
-                sr_opt, final_w, final_sh, old_w_last, rebal_date_opt, df_rebal, extm_opt = \
+                sr_opt, final_w, final_sh_opt, old_w_last, final_rebal_date, df_rebal, extm_opt = \
                     rolling_backtest_monthly_param_cvar(
                         df_prices= df_sub,
                         df_instruments= df_instruments,
@@ -429,7 +461,7 @@ def main():
                         daily_rf= daily_rf
                     )
             else:  # Direct (CVaR)
-                sr_opt, final_w, final_sh, old_w_last, rebal_date_opt, df_rebal, extm_opt = \
+                sr_opt, final_w, final_sh_opt, old_w_last, final_rebal_date, df_rebal, extm_opt = \
                     rolling_backtest_monthly_direct_cvar(
                         df_prices= df_sub,
                         df_instruments= df_instruments,
@@ -446,7 +478,7 @@ def main():
 
             extm_opt= extm_opt or {}
 
-            # Old drift => returns 2 items
+            # Old drift => 2 items
             sr_drift, shares_drift= pd.Series(dtype=float), np.array([])
             extm_drift= {}
             if "#Quantity" in df_instruments.columns:
@@ -464,7 +496,7 @@ def main():
                     if not sr_drift.empty:
                         extm_drift= compute_extended_metrics(sr_drift, daily_rf=daily_rf)
 
-            # Old strategic => returns 2 items
+            # Old strategic => 2 items
             sr_strat, shares_strat= pd.Series(dtype=float), np.array([])
             extm_strat= {}
             if "Weight_Old" in df_instruments.columns:
@@ -483,7 +515,7 @@ def main():
                         start_date= df_sub.index[0],
                         end_date= df_sub.index[-1],
                         strategic_weights= arr_,
-                        months_interval=12,
+                        months_interval= 12,
                         transaction_cost_value= transaction_cost_val,
                         transaction_cost_type= cost_type,
                         daily_rf= daily_rf
@@ -492,11 +524,11 @@ def main():
                     if not sr_strat.empty:
                         extm_strat= compute_extended_metrics(sr_strat, daily_rf=daily_rf)
 
-            # store results
+            # store all in session
             st.session_state["results"]= {
                 "sr_opt": sr_opt,
                 "extm_opt": extm_opt,
-                "final_sh_opt": final_sh,
+                "final_sh_opt": final_sh_opt,
 
                 "sr_drift": sr_drift,
                 "extm_drift": extm_drift,
@@ -507,12 +539,11 @@ def main():
                 "shares_strat": shares_strat,
 
                 "df_rebal": df_rebal,
-                # store for later reference
                 "asset_cls_list": asset_cls_list,
                 "sec_type_list": sec_type_list
             }
 
-        # If we have results => show them
+        # show results if any
         if "results" in st.session_state:
             r_ = st.session_state["results"]
             sr_opt      = r_["sr_opt"]
@@ -529,7 +560,6 @@ def main():
 
             df_rebal    = r_["df_rebal"]
             asset_cls_list= r_.get("asset_cls_list", [])
-            # sec_type_list= r_.get("sec_type_list", [])
 
             st.write("## Rolling Backtest Comparison")
             show_opt= st.checkbox("Optimized",   value=(not sr_opt.empty))
@@ -562,7 +592,7 @@ def main():
                 st.write("## Extended Metrics for Selected Portfolios")
                 display_multi_portfolio_metrics(metrics_map)
 
-            # Interval analysis
+            # Interval
             st.write("## Interval Analysis")
             rebal_dates= []
             if df_rebal is not None and not df_rebal.empty and "Date" in df_rebal.columns:
@@ -579,12 +609,6 @@ def main():
                 portfolio_map["Old Drift"]= sr_drift
             if show_strat and not sr_strat.empty:
                 portfolio_map["Old Strategic"]= sr_strat
-
-            from modules.backtesting.rolling_intervals import (
-                compute_multi_interval_returns,
-                plot_multi_interval_bars,
-                compute_predefined_pairs_diff_stats
-            )
 
             if (len(rebal_dates)<2) or (len(portfolio_map)<2):
                 st.info("Insufficient rebal dates or <2 portfolios => skip interval analysis.")
@@ -628,45 +652,76 @@ def main():
                 if fig_dd is not None:
                     st.plotly_chart(fig_dd)
 
-            # Final Aclass Weights
-            st.write("## Final Asset-Class Comparison")
+            # highlight function for "Diff"
             def highlight_diff(val):
-                if val>0:   return 'color:green'
-                elif val<0: return 'color:red'
-                else:       return 'color:black'
+                if val>0:   return "color: green"
+                elif val<0: return "color: red"
+                else:       return "color: black"
 
+            # ========== Final Asset-Class =============
+            st.write("## Final Asset-Class Comparison")
             w_opt_aclass= pd.Series(dtype=float)
             w_drift_aclass= pd.Series(dtype=float)
             w_strat_aclass= pd.Series(dtype=float)
 
-            # for optimized
-            if show_opt and not sr_opt.empty and (len(final_sh_opt)== df_sub.shape[1]):
+            if show_opt and not sr_opt.empty and (len(final_sh_opt)==df_sub.shape[1]):
                 w_opt_aclass= compute_final_aclass_weights(final_sh_opt, df_sub, asset_cls_list)
 
-            # for old drift
-            if show_drift and not sr_drift.empty and (len(shares_drift)== df_sub.shape[1]):
+            if show_drift and not sr_drift.empty and (len(shares_drift)==df_sub.shape[1]):
                 w_drift_aclass= compute_final_aclass_weights(shares_drift, df_sub, asset_cls_list)
 
-            # for old strategic
-            if show_strat and not sr_strat.empty and (len(shares_strat)== df_sub.shape[1]):
+            if show_strat and not sr_strat.empty and (len(shares_strat)==df_sub.shape[1]):
                 w_strat_aclass= compute_final_aclass_weights(shares_strat, df_sub, asset_cls_list)
 
-            # table => Optimized vs Old Drift
+            # Show table => "Optimized vs Old Drift"
             if not w_opt_aclass.empty and not w_drift_aclass.empty:
                 st.write("### Optimized vs Old Drift (Asset-Class Weights)")
-                df_cmp= pd.DataFrame({"Optimized": w_opt_aclass, "Old Drift": w_drift_aclass}).fillna(0.0)
-                df_cmp["Diff"]= df_cmp["Optimized"] - df_cmp["Old Drift"]
+                df_cmp_ac= pd.DataFrame({"Optimized": w_opt_aclass, "Old Drift": w_drift_aclass}).fillna(0.0)
+                df_cmp_ac["Diff"]= df_cmp_ac["Optimized"] - df_cmp_ac["Old Drift"]
                 st.dataframe(
-                    df_cmp.style.format("{:.2%}").applymap(highlight_diff, subset=["Diff"])
+                    df_cmp_ac.style.format("{:.2%}").applymap(highlight_diff, subset=["Diff"])
                 )
 
-            # table => Optimized vs Old Strategic
+            # Show table => "Optimized vs Old Strategic"
             if not w_opt_aclass.empty and not w_strat_aclass.empty:
                 st.write("### Optimized vs Old Strategic (Asset-Class Weights)")
-                df_cmp2= pd.DataFrame({"Optimized": w_opt_aclass, "Old Strategic": w_strat_aclass}).fillna(0.0)
-                df_cmp2["Diff"]= df_cmp2["Optimized"] - df_cmp2["Old Strategic"]
+                df_cmp_ac2= pd.DataFrame({"Optimized": w_opt_aclass, "Old Strategic": w_strat_aclass}).fillna(0.0)
+                df_cmp_ac2["Diff"]= df_cmp_ac2["Optimized"] - df_cmp_ac2["Old Strategic"]
                 st.dataframe(
-                    df_cmp2.style.format("{:.2%}").applymap(highlight_diff, subset=["Diff"])
+                    df_cmp_ac2.style.format("{:.2%}").applymap(highlight_diff, subset=["Diff"])
+                )
+
+            # ========== Final Instrument =============
+            st.write("## Final Instrument Comparison")
+            w_opt_instr   = pd.Series(dtype=float)
+            w_drift_instr = pd.Series(dtype=float)
+            w_strat_instr = pd.Series(dtype=float)
+
+            if show_opt and not sr_opt.empty and (len(final_sh_opt)== df_sub.shape[1]):
+                w_opt_instr= compute_final_instrument_weights(final_sh_opt, df_sub)
+
+            if show_drift and not sr_drift.empty and (len(shares_drift)== df_sub.shape[1]):
+                w_drift_instr= compute_final_instrument_weights(shares_drift, df_sub)
+
+            if show_strat and not sr_strat.empty and (len(shares_strat)== df_sub.shape[1]):
+                w_strat_instr= compute_final_instrument_weights(shares_strat, df_sub)
+
+            # table => "Optimized vs Old Drift" (Instruments)
+            if not w_opt_instr.empty and not w_drift_instr.empty:
+                st.write("### Optimized vs Old Drift (Instrument Weights)")
+                df_cmp_instr= pd.DataFrame({"Optimized": w_opt_instr, "Old Drift": w_drift_instr}).fillna(0.0)
+                df_cmp_instr["Diff"]= df_cmp_instr["Optimized"] - df_cmp_instr["Old Drift"]
+                st.dataframe(
+                    df_cmp_instr.style.format("{:.2%}").applymap(highlight_diff, subset=["Diff"])
+                )
+
+            # table => "Optimized vs Old Strategic" (Instruments)
+            if not w_opt_instr.empty and not w_strat_instr.empty:
+                st.write("### Optimized vs Old Strategic (Instrument Weights)")
+                df_cmp_instr2= pd.DataFrame({"Optimized": w_opt_instr, "Old Strategic": w_strat_instr}).fillna(0.0)
+                df_cmp_instr2["Diff"]= df_cmp_instr2["Optimized"] - df_cmp_instr2["Old Strategic"]
+                st.dataframe(
+                    df_cmp_instr2.style.format("{:.2%}").applymap(highlight_diff, subset=["Diff"])
                 )
 
             # Excel export
