@@ -28,7 +28,7 @@ from modules.backtesting.rolling_monthly import (
 
 # Interval / drawdown
 from modules.backtesting.rolling_intervals import display_interval_bars_and_stats
-from modules.backtesting.max_drawdown import plot_drawdown_series, show_max_drawdown_comparison
+from modules.backtesting.max_drawdown import plot_drawdown_series, show_max_drawdown_table
 
 # Bayesian
 from modules.backtesting.rolling_bayesian import rolling_bayesian_optimization
@@ -622,18 +622,31 @@ def main():
         )
 
         # Optional => drawdown
-        st.write("### Drawdown Over Time (New vs Old Drift)")
-        if not sr_new.empty and not sr_drift.empty:
-            import plotly.express as px
-            df_dd= pd.DataFrame({
-                "New Optimized": sr_new,
-                "Old Drift": sr_drift
-            }, index= sr_new.index)
-            df_dd= df_dd.dropna()
-            fig_dd= plot_drawdown_series(df_dd)
+        st.write("### Drawdown Over Time")
+
+        # 1) Construct a DataFrame with whichever lines are selected
+        df_draw = pd.DataFrame()
+        if c_new and not sr_new.empty:
+            df_draw["New Optimized"] = sr_new
+        if c_drift and not sr_drift.empty:
+            df_draw["Old Drift"] = sr_drift
+        if c_strat and not sr_strat.empty:
+            df_draw["Old Strategic"] = sr_strat
+
+        if df_draw.empty:
+            st.info("No portfolios selected for drawdown.")
+        else:
+            # 2) Drop any rows that are all-NaN
+            df_draw.dropna(how="all", inplace=True)
+
+            # 3) Plot the multi-line drawdown
+            fig_dd = plot_drawdown_series(df_draw, custom_title="Drawdown Over Time")
             st.plotly_chart(fig_dd)
-            dd_cmp= show_max_drawdown_comparison(df_dd)
-            st.dataframe(dd_cmp.style.format("{:.2%}"))
+
+            # 4) Show a table with each portfolio’s max drawdown
+            df_mdd = show_max_drawdown_table(df_draw)
+            st.write("### Max Drawdown Comparison")
+            st.dataframe(df_mdd.style.format("{:.2%}"))
 
         # Frontier if Markowitz
         # (not shown, but you can add exactly as before if you want.)

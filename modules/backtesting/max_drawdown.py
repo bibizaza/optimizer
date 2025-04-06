@@ -1,4 +1,4 @@
-# modules/backtesting/max_drawdown.py
+# File: modules/backtesting/max_drawdown.py
 
 import pandas as pd
 import plotly.express as px
@@ -6,8 +6,8 @@ import plotly.express as px
 def compute_drawdown_series(series_abs: pd.Series) -> pd.Series:
     """
     Computes the daily drawdown series from the start of `series_abs`.
-    Drawdown at time t is ( series_abs[t] / running_max[t] ) - 1.
-    Typically negative or zero.
+    Drawdown at time t is ( series_abs[t] / running_max[t] ) - 1,
+    which is typically <= 0.  If there's not enough data, we return zeros.
     """
     if len(series_abs) < 2:
         return pd.Series([0.0]*len(series_abs), index=series_abs.index)
@@ -19,61 +19,71 @@ def compute_drawdown_series(series_abs: pd.Series) -> pd.Series:
 
 def compute_max_drawdown(series_abs: pd.Series) -> float:
     """
-    The single maximum drawdown (a negative number, e.g. -0.25 => -25%).
+    The single maximum drawdown (a negative number).
     If < 2 points, returns 0.0 by default.
     """
     if len(series_abs) < 2:
         return 0.0
-
     dd_series = compute_drawdown_series(series_abs)
-    return dd_series.min()  # negative, e.g. -0.30 => -30%
+    return dd_series.min()  # e.g., -0.30 => -30%
 
 
-def show_max_drawdown_comparison(df_compare: pd.DataFrame) -> pd.DataFrame:
+def build_drawdown_df(df_abs: pd.DataFrame) -> pd.DataFrame:
     """
-    df_compare must have "Old_Ptf" and "New_Ptf" columns, each a timeseries of absolute values.
-    Returns a small one-row DataFrame:
-      Old MaxDD   New MaxDD
+    Given a DataFrame of absolute values, with each column
+    representing a portfolio, compute the daily drawdown for each.
+    Returns a new DataFrame with the same shape & index:
+      e.g. columns = ["New Optimized","Old Drift","Old Strategic"]
+    If a column has < 2 points, that column is all zeros.
     """
-    required_cols = ["Old_Ptf", "New_Ptf"]
-    for col in required_cols:
-        if col not in df_compare.columns:
-            raise ValueError(f"df_compare is missing required column '{col}'")
-
-    old_dd = compute_max_drawdown(df_compare["Old_Ptf"])
-    new_dd = compute_max_drawdown(df_compare["New_Ptf"])
-
-    return pd.DataFrame({
-        "Old MaxDD": [old_dd],
-        "New MaxDD": [new_dd]
-    })
+    dd_map = {}
+    for col in df_abs.columns:
+        dd_map[col] = compute_drawdown_series(df_abs[col])
+    df_dd = pd.DataFrame(dd_map, index=df_abs.index)
+    return df_dd
 
 
-def plot_drawdown_series(df_compare: pd.DataFrame):
+def plot_drawdown_series(df_abs: pd.DataFrame, custom_title: str = "Historical Drawdown"):
     """
-    Plots the historical drawdown lines for "Old_Ptf" and "New_Ptf".
-    Returns a Plotly figure with lines for Old Drawdown vs. New Drawdown.
+    Build a multi-line drawdown chart for whichever columns are in df_abs.
+    Each column in df_abs is a separate portfolio's absolute values.
+    We'll compute each column's drawdown, then plot them all in one figure.
     """
-    needed_cols = ["Old_Ptf", "New_Ptf"]
-    for c in needed_cols:
-        if c not in df_compare.columns:
-            raise ValueError(f"df_compare missing column '{c}'")
+    if df_abs.empty:
+        raise ValueError("df_abs is empty, no data to plot drawdown.")
 
-    old_dd = compute_drawdown_series(df_compare["Old_Ptf"])
-    new_dd = compute_drawdown_series(df_compare["New_Ptf"])
+    # Compute drawdown for each column
+    df_dd = build_drawdown_df(df_abs)
 
-    df_dd = pd.DataFrame({
-        "Old Drawdown": old_dd,
-        "New Drawdown": new_dd
-    }, index=df_compare.index)
-
+    # For labeling in the figure, we keep the original column names
     fig = px.line(
         df_dd,
         x=df_dd.index,
         y=df_dd.columns,
-        title="Historical Drawdown Over Time (Old vs New)",
-        labels={"value":"Drawdown", "index":"Date", "variable":"Portfolio"}
+        title=custom_title,
+        labels={"value": "Drawdown", "index": "Date", "variable": "Portfolio"}
     )
-    # Format Y-axis as a percentage
+    # format y-axis as a percentage
     fig.update_yaxes(tickformat=".2%")
     return fig
+
+
+def show_max_drawdown_table(df_abs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a small DataFrame with each column's MaxDD as a single row:
+      e.g. "New Optimized": -0.31,
+           "Old Drift":     -0.25,
+           "Old Strategic": -0.40
+    If a column has < 2 points, we consider its maxDD= 0.
+    """
+    if df_abs.empty:
+        return pd.DataFrame()
+
+    results = {}
+    for col in df_abs.columns:
+        mdd = compute_max_drawdown(df_abs[col])
+        results[col] = mdd
+
+    # Make a single-row DataFrame
+    df_out = pd.DataFrame([results], index=["MaxDD"])
+    return df_out
