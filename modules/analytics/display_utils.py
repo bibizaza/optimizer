@@ -4,59 +4,72 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-def build_metric_df(metric_keys, old_metrics, new_metrics):
-    rows = []
-    for mk in metric_keys:
-        val_old = old_metrics.get(mk, 0.0)
-        val_new = new_metrics.get(mk, 0.0)
-        rows.append((mk, val_old, val_new))
-    df_out = pd.DataFrame(rows, columns=["Metric","Old","New"])
-    df_out.set_index("Metric", inplace=True)
-    return df_out
+def display_extended_metrics(metrics_map: dict):
+    """
+    Display extended metrics for one or more portfolios side-by-side.
 
-def format_ext_metrics(df_):
+    Parameters
+    ----------
+    metrics_map : dict
+        A dictionary of the form:
+            {
+              "Portfolio Label" : { "Total Return": float, "Annual Return": float, ... },
+              "Another Label"   : { "Total Return": float, "Annual Return": float, ... },
+              ...
+            }
+        Each inner dictionary is typically the output of compute_extended_metrics(...).
     """
-    Format a DataFrame that has index=metric_name, columns=["Old","New"].
-    Certain metrics are shown as percentages, etc.
-    """
-    def format_val(mk, val):
-        pct_metrics= ["Total Return","Annual Return","Annual Vol","MaxDD","VaR_1M99","CVaR_1M99"]
-        if mk in pct_metrics:
+
+    # Define which metrics go in each category
+    performance_keys = ["Total Return","Annual Return","Annual Vol","Sharpe"]
+    risk_keys        = ["MaxDD","TimeToRecovery","VaR_1M99","CVaR_1M99"]
+    ratio_keys       = ["Skew","Kurtosis","Sortino","Calmar","Omega"]
+
+    # Helper to format each numeric cell
+    def format_val(metric_name: str, val: float) -> str:
+        pct_metrics = ["Total Return","Annual Return","Annual Vol","MaxDD","VaR_1M99","CVaR_1M99"]
+        if metric_name in pct_metrics:
             return f"{val*100:.2f}%"
-        elif mk=="TimeToRecovery":
+        elif metric_name == "TimeToRecovery":
             return f"{val:.0f}"
         else:
             return f"{val:.3f}"
 
-    dfx= df_.copy()
-    for mk in dfx.index:
-        for colx in ["Old","New"]:
-            rawv= dfx.loc[mk, colx]
-            dfx.loc[mk, colx] = format_val(mk, rawv)
-    return dfx
+    def make_table_for_category(metric_keys_list):
+        """
+        Build a DataFrame for one category of metrics (e.g., performance, risk, ratio).
+        Rows = metric names
+        Columns = each portfolio label from metrics_map
+        """
+        rows = []
+        for mk in metric_keys_list:
+            row_dict = {"Metric": mk}
+            for portfolio_label, mdict in metrics_map.items():
+                row_dict[portfolio_label] = mdict.get(mk, 0.0)
+            rows.append(row_dict)
 
-def display_extended_metrics(old_metrics: dict, new_metrics: dict):
-    """
-    Show performance, risk, ratio metrics in separate tables.
-    old_metrics, new_metrics come from e.g. compute_extended_metrics(...)
-    """
+        df_cat = pd.DataFrame(rows)
+        df_cat.set_index("Metric", inplace=True)
 
-    # same groupings as your code
-    performance_keys= ["Total Return","Annual Return","Annual Vol","Sharpe"]
-    risk_keys       = ["MaxDD","TimeToRecovery","VaR_1M99","CVaR_1M99"]
-    ratio_keys      = ["Skew","Kurtosis","Sortino","Calmar","Omega"]
+        # Format each cell
+        for mk in df_cat.index:
+            for col_ in df_cat.columns:
+                raw_val = df_cat.loc[mk, col_]
+                df_cat.loc[mk, col_] = format_val(mk, raw_val)
 
-    # 1) Performance
-    df_perf = build_metric_df(performance_keys, old_metrics, new_metrics)
+        return df_cat
+
+    # 1) Performance category
     st.write("### Extended Metrics - Performance")
-    st.dataframe(format_ext_metrics(df_perf))
+    df_perf = make_table_for_category(performance_keys)
+    st.dataframe(df_perf)
 
-    # 2) Risk
-    df_risk = build_metric_df(risk_keys, old_metrics, new_metrics)
+    # 2) Risk category
     st.write("### Extended Metrics - Risk")
-    st.dataframe(format_ext_metrics(df_risk))
+    df_risk = make_table_for_category(risk_keys)
+    st.dataframe(df_risk)
 
-    # 3) Ratios
-    df_ratio = build_metric_df(ratio_keys, old_metrics, new_metrics)
+    # 3) Ratios category
     st.write("### Extended Metrics - Ratios")
-    st.dataframe(format_ext_metrics(df_ratio))
+    df_ratio = make_table_for_category(ratio_keys)
+    st.dataframe(df_ratio)
