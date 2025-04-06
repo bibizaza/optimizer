@@ -594,25 +594,32 @@ def main():
             st.dataframe(pd.DataFrame([cost_stats]))
 
         # Interval => new vs drift
-        st.write("### Interval Performance (New vs Old Drift)")
-        if not sr_new.empty and not sr_drift.empty:
-            if not df_rebal.empty and "Date" in df_rebal.columns:
-                rebal_dates= sorted(df_rebal["Date"].unique())
-                if sr_new.index[0] not in rebal_dates:
-                    rebal_dates= [sr_new.index[0]]+ rebal_dates
-                if rebal_dates[-1]< sr_new.index[-1]:
-                    rebal_dates.append(sr_new.index[-1])
-            else:
-                rebal_dates= [sr_new.index[0], sr_new.index[-1]]
+        st.write("## Interval Performance (Multi-Portfolios)")
+        if not df_rebal.empty and "Date" in df_rebal.columns:
+            rebal_dates = sorted(df_rebal["Date"].unique())
+            if sr_new.index[0] not in rebal_dates:
+                rebal_dates = [sr_new.index[0]] + rebal_dates
+            if rebal_dates[-1] < sr_new.index[-1]:
+                rebal_dates.append(sr_new.index[-1])
+        else:
+            rebal_dates = [sr_new.index[0], sr_new.index[-1]]
 
-            display_interval_bars_and_stats(
-                sr_line_old= sr_drift,
-                sr_line_new= sr_new,
-                rebal_dates= rebal_dates,
-                label_old="Old Drift",
-                label_new="New Optimized",
-                display_mode="grouped"
-            )
+        # Now call the new multi-line approach:
+        display_interval_bars_and_stats(
+            sr_new = sr_new,
+            sr_drift = sr_drift,
+            sr_strat = sr_strat,
+            c_new = c_new,         # your checkbox
+            c_drift = c_drift,
+            c_strat = c_strat,
+            rebal_dates = rebal_dates,
+            label_new="New Optimized",
+            label_drift="Old Drift",
+            label_strat="Old Strategic",
+            color_new="#1f77b4",
+            color_drift="grey",
+            color_strat="lightblue"
+        )
 
         # Optional => drawdown
         st.write("### Drawdown Over Time (New vs Old Drift)")

@@ -4,193 +4,213 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-def compute_interval_returns(
-    sr_line_old: pd.Series,
-    sr_line_new: pd.Series,
+def get_interval_returns_for_line(
+    sr_line: pd.Series,
     rebal_dates: list[pd.Timestamp],
-    label_old: str = "Old",
-    label_new: str = "New"
+    portfolio_label: str = "Portfolio"
 ) -> pd.DataFrame:
     """
-    Computes interval returns for old vs new between consecutive rebalancing dates.
-    Each row => "Interval Start", "Interval End", label_old+"(%)", label_new+"(%)", "Diff(%)"
+    For a single timeseries 'sr_line', compute the interval returns between consecutive
+    rebal_dates. Return a DataFrame with columns:
+      ["Interval Start","Interval End","Portfolio","Return(%)"].
     """
     rows = []
-    rebal_dates_sorted = sorted(list(set(rebal_dates)))
+    sorted_dates = sorted(list(set(rebal_dates)))
+    for i in range(len(sorted_dates) - 1):
+        start_d = sorted_dates[i]
+        end_d   = sorted_dates[i + 1]
 
-    for i in range(len(rebal_dates_sorted) - 1):
-        start_d = rebal_dates_sorted[i]
-        end_d   = rebal_dates_sorted[i + 1]
-
-        sub_old = sr_line_old.loc[start_d:end_d]
-        sub_new = sr_line_new.loc[start_d:end_d]
-
-        if len(sub_old) < 2 or len(sub_new) < 2:
+        sub = sr_line.loc[start_d:end_d]
+        if len(sub) < 2:
             continue
 
-        ret_old = sub_old.iloc[-1] / sub_old.iloc[0] - 1
-        ret_new = sub_new.iloc[-1] / sub_new.iloc[0] - 1
-
+        ret_ = sub.iloc[-1] / sub.iloc[0] - 1
         rows.append({
             "Interval Start": start_d,
             "Interval End":   end_d,
-            f"{label_old}(%)": ret_old * 100,
-            f"{label_new}(%)": ret_new * 100,
-            "Diff(%)": (ret_new - ret_old) * 100
+            "Portfolio":      portfolio_label,
+            "Return(%)":      ret_ * 100.0
         })
 
     return pd.DataFrame(rows)
 
-def plot_interval_bars(
-    df_intervals: pd.DataFrame,
-    label_old: str = "Old(%)",
-    label_new: str = "New(%)",
-    display_mode: str = "grouped"
-):
-    """
-    Create a Plotly bar chart for interval returns.
 
-    display_mode => "difference" => one bar per interval => "Diff(%)"
-                 => "grouped"    => side-by-side bars for old vs new
-    """
-    if display_mode == "difference":
-        if "Diff(%)" not in df_intervals.columns:
-            raise ValueError("df_intervals must have 'Diff(%)' column for difference mode.")
-        df_plot = df_intervals.copy()
-        df_plot["Interval"] = df_plot["Interval Start"].astype(str)
-        fig = px.bar(
-            df_plot,
-            x="Interval",
-            y="Diff(%)",
-            title="Interval Return Difference (New - Old)",
-            labels={"Interval": "Rebalance Interval", "Diff(%)": "Return Difference (%)"}
-        )
-        fig.update_layout(xaxis=dict(type="category"))
-        return fig
-
-    elif display_mode == "grouped":
-        # side-by-side bars => old vs new
-        missing_cols = []
-        for c in [label_old, label_new]:
-            if c not in df_intervals.columns:
-                missing_cols.append(c)
-        if missing_cols:
-            raise ValueError(f"df_intervals missing columns: {missing_cols}")
-
-        df_plot = df_intervals.copy()
-        df_plot["Interval"] = df_plot["Interval Start"].astype(str)
-        df_melt = df_plot.melt(
-            id_vars=["Interval", "Interval End"],
-            value_vars=[label_old, label_new],
-            var_name="Portfolio",
-            value_name="Return(%)"
-        )
-        fig = px.bar(
-            df_melt,
-            x="Interval",
-            y="Return(%)",
-            color="Portfolio",
-            barmode="group",
-            title="Interval Returns: Old vs. New",
-            labels={"Interval": "Rebalance Interval", "Return(%)": "Interval Return (%)"}
-        )
-        fig.update_layout(xaxis=dict(type="category"))
-        return fig
-
-    else:
-        raise ValueError("display_mode must be 'difference' or 'grouped'")
-
-def compute_interval_stats(
-    df_intervals: pd.DataFrame,
-    diff_col: str = "Diff(%)"
+def compute_diff_stats_between_two(
+    sr_a: pd.Series,
+    sr_b: pd.Series,
+    rebal_dates: list[pd.Timestamp],
+    label_a: str,
+    label_b: str
 ) -> dict:
     """
-    Compute summary metrics from df_intervals (which has 'Diff(%)'):
-      - Number of intervals
-      - Win Count
-      - Win Rate(%)
-      - Average Diff(%)
-      - Median Diff(%)
-      - Max Diff(%)
-      - Min Diff(%)
-      - Average Positive Diff(%)
-      - Average Negative Diff(%)
+    Compute the interval differences (A minus B) for each interval, then
+    build a dict with Win Rate, Average Diff, etc.
+    We'll store these in one row of a final "comparison" table.
     """
-    if diff_col not in df_intervals.columns:
-        raise ValueError(f"df_intervals must have '{diff_col}' column for stats.")
+    sorted_dates = sorted(list(set(rebal_dates)))
+    diffs = []
+    for i in range(len(sorted_dates) - 1):
+        start_d = sorted_dates[i]
+        end_d   = sorted_dates[i + 1]
 
-    diffs = df_intervals[diff_col]
-    n_intervals = len(diffs)
-    if n_intervals == 0:
+        sub_a = sr_a.loc[start_d:end_d]
+        sub_b = sr_b.loc[start_d:end_d]
+        if len(sub_a) < 2 or len(sub_b) < 2:
+            continue
+
+        ret_a = sub_a.iloc[-1] / sub_a.iloc[0] - 1
+        ret_b = sub_b.iloc[-1] / sub_b.iloc[0] - 1
+        diffs.append(ret_a - ret_b)
+
+    if len(diffs) == 0:
         return {
-            "Number of Intervals": 0,
-            "Win Count": 0,
-            "Win Rate(%)": 0.0,
-            "Average Diff(%)": 0.0,
-            "Median Diff(%)": 0.0,
-            "Max Diff(%)": 0.0,
-            "Min Diff(%)": 0.0,
-            "Average Positive Diff(%)": 0.0,
-            "Average Negative Diff(%)": 0.0
+            "Comparison": f"{label_a} vs {label_b}",
+            "Intervals": 0,
+            "Win Rate(%)": 0.00,
+            "Avg Diff(%)": 0.00,
+            "Median Diff(%)": 0.00,
+            "Max Diff(%)": 0.00,
+            "Min Diff(%)": 0.00
         }
 
-    wins = diffs[diffs > 0]
-    lose = diffs[diffs < 0]
-    n_win = len(wins)
-    win_rate = 100.0 * n_win / n_intervals
+    diffs_series = pd.Series(diffs)
+    n = len(diffs_series)
+    # "Win Rate" => how often A minus B is > 0
+    wins = diffs_series[diffs_series > 0].count()
+    win_rate = (wins / n) * 100.0
 
-    avg_diff = diffs.mean()
-    med_diff = diffs.median()
-    max_diff = diffs.max()
-    min_diff = diffs.min()
-
-    avg_positive = wins.mean() if len(wins) > 0 else 0.0
-    avg_negative = lose.mean() if len(lose) > 0 else 0.0
-
-    stats = {
-        "Number of Intervals": n_intervals,
-        "Win Count": n_win,
-        "Win Rate(%)": round(win_rate, 2),
-        "Average Diff(%)": round(avg_diff, 3),
-        "Median Diff(%)": round(med_diff, 3),
-        "Max Diff(%)": round(max_diff, 3),
-        "Min Diff(%)": round(min_diff, 3),
-        "Average Positive Diff(%)": round(avg_positive, 3),
-        "Average Negative Diff(%)": round(avg_negative, 3)
+    stats_row = {
+        "Comparison":       f"{label_a} vs {label_b}",
+        "Intervals":        n,
+        "Win Rate(%)":      round(win_rate, 2),
+        "Avg Diff(%)":      round(diffs_series.mean() * 100.0, 2),
+        "Median Diff(%)":   round(diffs_series.median() * 100.0, 2),
+        "Max Diff(%)":      round(diffs_series.max() * 100.0, 2),
+        "Min Diff(%)":      round(diffs_series.min() * 100.0, 2)
     }
-    return stats
+    return stats_row
+
 
 def display_interval_bars_and_stats(
-    sr_line_old: pd.Series,
-    sr_line_new: pd.Series,
+    sr_new: pd.Series,
+    sr_drift: pd.Series,
+    sr_strat: pd.Series,
+    c_new: bool,
+    c_drift: bool,
+    c_strat: bool,
     rebal_dates: list[pd.Timestamp],
-    label_old: str = "Old",
-    label_new: str = "New",
-    display_mode: str = "grouped"
+    label_new="New",
+    label_drift="Old Drift",
+    label_strat="Old Strategic",
+    color_new="#1f77b4",
+    color_drift="grey",
+    color_strat="lightblue"
 ):
     """
-    High-level function that:
-     1) Computes interval returns,
-     2) Plots a bar chart,
-     3) Shows summary stats (win rate, avg diff, etc.) in a small table below.
+    Multi-portfolio interval analysis:
+      1) For each *checked* portfolio, compute interval returns => single grouped bar chart
+      2) Build a table of difference stats for each pair that is selected:
+         - e.g. (New vs Drift), (New vs Strat), (Drift vs Strat).
+         - Only show pairs that both exist.
 
-    This keeps optima_optimizer.py simpler:
-     - Just call display_interval_bars_and_stats(...) once you have sr_line_old, sr_line_new, rebal_dates
+    'rebal_dates' => the list of interval boundaries
     """
-    # 1) Compute intervals
-    df_intervals = compute_interval_returns(sr_line_old, sr_line_new, rebal_dates, label_old, label_new)
 
-    # 2) Build bar chart
-    fig = plot_interval_bars(
-        df_intervals=df_intervals,
-        label_old=f"{label_old}(%)",
-        label_new=f"{label_new}(%)",
-        display_mode=display_mode
+    # 1) Build a dict for whichever lines are visible.
+    lines = {}
+    colors = {}
+
+    if c_new and not sr_new.empty:
+        lines[label_new] = sr_new
+        colors[label_new] = color_new
+    if c_drift and not sr_drift.empty:
+        lines[label_drift] = sr_drift
+        colors[label_drift] = color_drift
+    if c_strat and not sr_strat.empty:
+        lines[label_strat] = sr_strat
+        colors[label_strat] = color_strat
+
+    if len(lines) < 1:
+        st.info("No portfolios selected => no interval performance.")
+        return
+
+    # 2) Compute interval returns for each selected portfolio
+    all_rows = []
+    for lbl, sr_ in lines.items():
+        df_ = get_interval_returns_for_line(sr_, rebal_dates, portfolio_label=lbl)
+        all_rows.append(df_)
+
+    if not all_rows:
+        st.info("No intervals to compute (empty).")
+        return
+
+    df_all = pd.concat(all_rows, ignore_index=True)
+
+    # 3) Plot a grouped bar => "Interval Start" on X, "Return(%)" on Y, color="Portfolio"
+    df_all["Interval"] = df_all["Interval Start"].astype(str)
+    fig = px.bar(
+        df_all,
+        x="Interval",
+        y="Return(%)",
+        color="Portfolio",
+        barmode="group",
+        labels={
+            "Interval": "Rebalance Interval",
+            "Return(%)": "Interval Return (%)"
+        },
+        title="Interval Returns (Grouped)",
     )
+    # optionally fix the color mapping
+    fig.update_layout(
+        xaxis=dict(type="category"),
+        legend_title_text="Portfolio"
+    )
+    # apply custom colors if desired
+    color_map = {}
+    for lbl in lines.keys():
+        color_map[lbl] = colors.get(lbl, None)  # default None => px auto
+    fig.for_each_trace(
+        lambda t: t.update(marker_color=color_map.get(t.name, t.marker.color))
+    )
+
     st.plotly_chart(fig)
 
-    # 3) Summaries
-    stats_dict = compute_interval_stats(df_intervals, diff_col="Diff(%)")
-    df_stats = pd.DataFrame([stats_dict])
-    st.write("### Interval Stats")
-    st.table(df_stats)
+    # 4) Now build the difference table (3 lines => new vs drift, new vs strat, drift vs strat)
+    #    only for pairs that exist in 'lines'
+    comparison_rows = []
+    if label_new in lines and label_drift in lines:
+        row_ = compute_diff_stats_between_two(
+            sr_a=lines[label_new],
+            sr_b=lines[label_drift],
+            rebal_dates=rebal_dates,
+            label_a=label_new,
+            label_b=label_drift
+        )
+        comparison_rows.append(row_)
+
+    if label_new in lines and label_strat in lines:
+        row_ = compute_diff_stats_between_two(
+            sr_a=lines[label_new],
+            sr_b=lines[label_strat],
+            rebal_dates=rebal_dates,
+            label_a=label_new,
+            label_b=label_strat
+        )
+        comparison_rows.append(row_)
+
+    if label_drift in lines and label_strat in lines:
+        row_ = compute_diff_stats_between_two(
+            sr_a=lines[label_drift],
+            sr_b=lines[label_strat],
+            rebal_dates=rebal_dates,
+            label_a=label_drift,
+            label_b=label_strat
+        )
+        comparison_rows.append(row_)
+
+    if comparison_rows:
+        df_cmp = pd.DataFrame(comparison_rows)
+        st.write("### Interval Comparison Stats (Pairwise)")
+        st.dataframe(df_cmp)
+    else:
+        st.write("No pairwise comparisons to show (fewer than 2 portfolios).")
