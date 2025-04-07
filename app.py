@@ -58,6 +58,9 @@ from modules.analytics.extended_metrics import compute_extended_metrics
 # For "Extended Metrics" display
 from modules.analytics.display_utils import display_extended_metrics
 
+#risk contribution
+from modules.analytics.risk_contributions import display_risk_contributions
+
 # Excel export
 from modules.export.export_backtest_to_excel import export_backtest_results_to_excel
 
@@ -694,6 +697,22 @@ def main():
             w_drift=w_drift,
             w_strat=w_strat
         )
+
+        df_daily_rets = df_sub.pct_change().dropna()  # shape (N_days, n_assets)
+
+        # Suppose alpha = 0.95, i.e. 95% VaR
+        alpha = 0.95
+
+        # show both VaR and CVaR
+        display_risk_contributions(
+            df_returns=df_daily_rets,
+            col_tickers=col_tickers,
+            weights=w_new,
+            alpha=alpha,
+            show_var=True,
+            show_cvar=True
+        )
+
 
 if __name__=="__main__":
     main()
