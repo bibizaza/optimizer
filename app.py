@@ -50,7 +50,8 @@ from modules.optimization.efficient_frontier import (
 
 # Weight / extended metrics
 from modules.analytics.weight_display import (
-    display_three_portfolio_class_weights
+    display_three_portfolio_class_weights,
+    display_new_vs_old_instrument_tables
 )
 from modules.analytics.extended_metrics import compute_extended_metrics
 
@@ -677,11 +678,18 @@ def main():
         w_drift= st.session_state["results"].get("w_drift_final", np.zeros(len(col_tickers)))
         w_strat= st.session_state["results"].get("w_strat_final", np.zeros(len(col_tickers)))
 
-        # Now we can safely call display_three_portfolio_class_weights
+        # Show asset-class summary (3-port) if you want:
         display_three_portfolio_class_weights(
+            df_instruments, col_tickers, asset_cls_list,
+            w_new=w_new,
+            w_drift=w_drift,
+            w_strat=w_strat
+        )
+
+        # Then show instrument-level side-by-side (2-port):
+        display_new_vs_old_instrument_tables(
             df_instruments=df_instruments,
             col_tickers=col_tickers,
-            asset_classes=asset_cls_list,
             w_new=w_new,
             w_drift=w_drift,
             w_strat=w_strat
