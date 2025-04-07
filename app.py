@@ -50,8 +50,7 @@ from modules.optimization.efficient_frontier import (
 
 # Weight / extended metrics
 from modules.analytics.weight_display import (
-    display_instrument_weight_diff,
-    display_class_weight_diff
+    display_three_portfolio_class_weights
 )
 from modules.analytics.extended_metrics import compute_extended_metrics
 
@@ -125,6 +124,20 @@ def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     df_prices.fillna(method="ffill", inplace=True)
     df_prices.fillna(method="bfill", inplace=True)
     return df_prices
+
+def build_df_drift_weights(df_instruments: pd.DataFrame, df_sub: pd.DataFrame) -> np.ndarray:
+    """
+    Compute final drift weights (buy & hold) by:
+      #Quantity * last price => final holding
+      => final weights
+    """
+    qties = df_instruments["#Quantity"].fillna(0.0).values
+    last_prices = df_sub.iloc[-1].fillna(0.0).values
+    val = qties * last_prices
+    total_val = val.sum()
+    if total_val <= 0:
+        total_val = 1.0
+    return val / total_val
 
 def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> pd.Series:
     """
@@ -208,13 +221,21 @@ def main():
     # Build old drift line
     old_drift_line = build_old_portfolio_line(df_instruments, df_sub)
 
+    # We'll also compute final drift weights (no rebal => last day)
+    drift_final_w = build_df_drift_weights(df_instruments, df_sub)
+    # store in session so we can reference later
+    if "results" not in st.session_state:
+        st.session_state["results"] = {}
+    st.session_state["results"]["w_drift_final"] = drift_final_w
+
     # Build old strategic line => rolling_backtest_monthly_strategic
     from modules.backtesting.rolling_monthly import rolling_backtest_monthly_strategic
     sr_strat = pd.Series(dtype=float)
     strat_extm= {}
+    w_s_final = np.zeros(len(col_tickers))  # fallback
     if df_instruments["Weight_Old"].sum() > 1e-12:
         # we have a valid strategic weighting
-        sr_s, w_s_final, w_s_old, dt_s, df_sreb, extm_s = rolling_backtest_monthly_strategic(
+        sr_s, w_s_final_, w_s_old, dt_s, df_sreb, extm_s = rolling_backtest_monthly_strategic(
             df_prices= df_sub,
             df_instruments= df_instruments,
             start_date= df_sub.index[0],
@@ -224,8 +245,10 @@ def main():
             transaction_cost_type= cost_type,
             daily_rf= daily_rf
         )
-        sr_strat= sr_s
-        strat_extm= extm_s
+        sr_strat = sr_s
+        strat_extm = extm_s
+        w_s_final = w_s_final_  # rename for clarity
+    st.session_state["results"]["w_strat_final"] = w_s_final
 
     # -------------------------------------------------------------------
     #  A) Track user's top radio => if changed => reset st.session_state
@@ -440,17 +463,19 @@ def main():
             sr_drift_local = old_drift_line.reindex(sr_new.index, method="ffill")
             extm_drift = compute_extended_metrics(sr_drift_local, daily_rf=daily_rf)
 
+            # also store final new optimized weights
+            st.session_state["results"]["w_new_final"] = w_final
+
             # store results
-            st.session_state["results"] = {
+            st.session_state["results"].update({
                 "sr_new": sr_new,
                 "extm_new": extm_new,
                 "df_rebal": df_rebal,
                 "sr_drift": sr_drift_local,
                 "extm_drift": extm_drift,
                 "sr_strat": sr_strat.reindex(sr_new.index, method="ffill"),
-                "extm_strat": strat_extm,
-                "w_final": w_final
-            }
+                "extm_strat": strat_extm
+            })
 
     elif top_choice=="Hyperparameter Optimization":
         hyper_choice= st.radio("Hyperparameter Method:", ["Grid Search","Bayesian"], index=0)
@@ -543,7 +568,6 @@ def main():
                 x= sr_new.index,
                 y= (sr_new/sr_new.iloc[0]-1)*100,
                 name="New Optimized",
-                # updated color => standard d3 "blue"
                 line=dict(color="#1f77b4", width=2)
             ))
         if c_drift and not sr_drift.empty:
@@ -604,12 +628,12 @@ def main():
         else:
             rebal_dates = [sr_new.index[0], sr_new.index[-1]]
 
-        # Now call the new multi-line approach:
+        # Multi-line approach (already in your code):
         display_interval_bars_and_stats(
             sr_new = sr_new,
             sr_drift = sr_drift,
             sr_strat = sr_strat,
-            c_new = c_new,         # your checkbox
+            c_new = c_new,
             c_drift = c_drift,
             c_strat = c_strat,
             rebal_dates = rebal_dates,
@@ -621,10 +645,9 @@ def main():
             color_strat="lightblue"
         )
 
-        # Optional => drawdown
+        # Drawdown
         st.write("### Drawdown Over Time")
 
-        # 1) Construct a DataFrame with whichever lines are selected
         df_draw = pd.DataFrame()
         if c_new and not sr_new.empty:
             df_draw["New Optimized"] = sr_new
@@ -636,21 +659,33 @@ def main():
         if df_draw.empty:
             st.info("No portfolios selected for drawdown.")
         else:
-            # 2) Drop any rows that are all-NaN
             df_draw.dropna(how="all", inplace=True)
-
-            # 3) Plot the multi-line drawdown
             fig_dd = plot_drawdown_series(df_draw, custom_title="Drawdown Over Time")
             st.plotly_chart(fig_dd)
-
-            # 4) Show a table with each portfolio’s max drawdown
             df_mdd = show_max_drawdown_table(df_draw)
             st.write("### Max Drawdown Comparison")
             st.dataframe(df_mdd.style.format("{:.2%}"))
 
         # Frontier if Markowitz
-        # (not shown, but you can add exactly as before if you want.)
+        # (not shown, but can be added as needed.)
 
+        # ----------------------------------------------------------------
+        # Now fix the "NameError: 'w_new' is not defined"
+        # We define w_new, w_drift, w_strat from stored final weights
+        # ----------------------------------------------------------------
+        w_new  = st.session_state["results"].get("w_new_final",   np.zeros(len(col_tickers)))
+        w_drift= st.session_state["results"].get("w_drift_final", np.zeros(len(col_tickers)))
+        w_strat= st.session_state["results"].get("w_strat_final", np.zeros(len(col_tickers)))
+
+        # Now we can safely call display_three_portfolio_class_weights
+        display_three_portfolio_class_weights(
+            df_instruments=df_instruments,
+            col_tickers=col_tickers,
+            asset_classes=asset_cls_list,
+            w_new=w_new,
+            w_drift=w_drift,
+            w_strat=w_strat
+        )
 
 if __name__=="__main__":
     main()

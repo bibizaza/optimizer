@@ -1,130 +1,71 @@
-# modules/analytics/weight_display.py
+# File: modules/analytics/weight_display.py
 
 import pandas as pd
 import numpy as np
 import streamlit as st
+from collections import defaultdict
 
-def display_instrument_weight_diff(
-    df_instruments: pd.DataFrame,
-    col_tickers: list[str],
-    new_w: np.ndarray
-):
-    """
-    Display a color-coded table of old vs new weights at the instrument level,
-    with columns: Ticker, Name, Asset Class, Old W, New W, Diff.
-
-    Requirements:
-      - df_instruments must have:
-         "#ID" => the ticker
-         "#Name" => the instrument name
-         "#Asset" => the asset class
-         "Weight_Old" => the old weight
-      - col_tickers => list of tickers in the same order as new_w
-      - new_w => shape=(len(col_tickers),) the new final weights
-    """
-
-    # 1) Build lookups (ticker => old_weight, name, asset_class)
-    old_weight_map= {}
-    name_map= {}
-    asset_map= {}
-
-    for _, row_ in df_instruments.iterrows():
-        tkr= row_["#ID"]
-        old_weight_map[tkr]= row_["Weight_Old"]
-        # if your sheet has "#Name" => store it
-        name_map[tkr] = row_.get("#Name","")
-        # if your sheet has "#Asset" => store it
-        asset_map[tkr] = row_.get("#Asset_Class","Unknown")
-
-    # 2) Build a table (DataFrame) row by row
-    rows= []
-    for i, tkr in enumerate(col_tickers):
-        old_w= old_weight_map.get(tkr,0.0)
-        new_wi= new_w[i]
-        diff= new_wi - old_w
-
-        instr_name= name_map.get(tkr,"")
-        instr_asset= asset_map.get(tkr,"Unknown")
-
-        rows.append([
-            tkr,
-            instr_name,
-            instr_asset,
-            old_w,
-            new_wi,
-            diff
-        ])
-
-    df_instr= pd.DataFrame(
-        rows, 
-        columns=["Ticker","Name","Asset Class","Old W","New W","Diff"]
-    )
-
-    # 3) Color-coded style for the "Diff" column
-    def color_diff(val):
-        if val>0: return "color:green"
-        elif val<0: return "color:red"
-        else: return "color:black"
-
-    st.write("### Instrument-Level Weight Changes")
-    st.dataframe(
-        df_instr.style
-        .applymap(color_diff, subset=["Diff"])
-        .format({"Old W":"{:.2%}","New W":"{:.2%}","Diff":"{:.2%}"})
-    )
-
-
-def display_class_weight_diff(
+def display_three_portfolio_class_weights(
     df_instruments: pd.DataFrame,
     col_tickers: list[str],
     asset_classes: list[str],
-    new_w: np.ndarray
+    w_new: np.ndarray,
+    w_drift: np.ndarray,
+    w_strat: np.ndarray
 ):
     """
-    Display a color-coded table of old vs new asset-class weights, 
-    difference in red/green. Sums old/new by 'Asset Class'.
+    Builds and displays a single table showing each asset class
+    and the corresponding total weights in the three portfolios:
+      - New Optimized  (w_new)
+      - Old Drift      (w_drift)
+      - Old Strategic  (w_strat)
+
     Requirements:
-      - df_instruments => must have "#ID" => the ticker, "Weight_Old" => old weight
-      - col_tickers => same order as new_w
-      - asset_classes => same order as col_tickers
-      - new_w => final new weights
+      - df_instruments has a row per ticker, with:
+          "#ID" => ticker
+          "Weight_Old" => old weighting (not used here, just for reference if needed)
+      - col_tickers => list of ticker names in the same order as w_new, w_drift, w_strat
+      - asset_classes => same length as col_tickers, each element is the asset class of that ticker
+      - w_new, w_drift, w_strat => final weight vectors for each portfolio
+        (all shape=(len(col_tickers),))
+
+    We sum weights by asset class and display them side-by-side as percentages.
     """
-    from collections import defaultdict
 
-    old_weight_map= {}
-    for _, row_ in df_instruments.iterrows():
-        tkr= row_["#ID"]
-        old_weight_map[tkr]= row_["Weight_Old"]
+    # 0) Basic checks
+    n_tickers = len(col_tickers)
+    if (len(w_new) != n_tickers or
+        len(w_drift) != n_tickers or
+        len(w_strat) != n_tickers or
+        len(asset_classes) != n_tickers):
+        st.error("Length mismatch in display_three_portfolio_class_weights.")
+        return
 
-    sum_old= defaultdict(float)
-    sum_new= defaultdict(float)
+    # 1) Summation by asset class
+    sums_map = defaultdict(lambda: [0.0, 0.0, 0.0])  # key=class => [sum_new, sum_drift, sum_strat]
+    for i, cls in enumerate(asset_classes):
+        sums_map[cls][0] += w_new[i]
+        sums_map[cls][1] += w_drift[i]
+        sums_map[cls][2] += w_strat[i]
 
-    for i, tkr in enumerate(col_tickers):
-        cl= asset_classes[i]
-        w_old= old_weight_map.get(tkr, 0.0)
-        w_new= new_w[i]
-        sum_old[cl]+= w_old
-        sum_new[cl]+= w_new
+    # 2) Build rows => one row per unique asset class
+    rows = []
+    for cls_name, (val_new, val_drift, val_strat) in sums_map.items():
+        rows.append({
+            "Asset Class":    cls_name,
+            "New Optimized":  val_new,
+            "Old Drift":      val_drift,
+            "Old Strategic":  val_strat
+        })
 
-    # build final table => one row per class
-    all_cls= sorted(set(asset_classes))
-    rows= []
-    for cl in all_cls:
-        o= sum_old.get(cl,0.0)
-        n= sum_new.get(cl,0.0)
-        diff= n - o
-        rows.append([cl, o, n, diff])
+    # sort by asset class name
+    rows.sort(key=lambda x: x["Asset Class"])
 
-    df_cls= pd.DataFrame(rows, columns=["Asset Class","Old W","New W","Diff"])
+    df_cls = pd.DataFrame(rows)
+    df_cls.set_index("Asset Class", inplace=True)
 
-    def color_diff(val):
-        if val>0: return "color:green"
-        elif val<0: return "color:red"
-        else: return "color:black"
-
-    st.write("### Asset-Class Weight Changes")
+    # 3) Display in Streamlit => percent columns
+    st.write("### Asset-Class Weights (All Three Portfolios)")
     st.dataframe(
-        df_cls.style
-        .applymap(color_diff, subset=["Diff"])
-        .format({"Old W":"{:.2%}","New W":"{:.2%}","Diff":"{:.2%}"})
+        df_cls.style.format("{:.2%}")
     )
