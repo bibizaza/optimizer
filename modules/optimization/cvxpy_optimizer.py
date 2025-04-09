@@ -5,7 +5,7 @@ import cvxpy as cp
 import pandas as pd
 
 # Local utilities for covariance shrinking
-from modules.optimization.utils.cov_shrink import (
+from modules.optimization.utils.cov_utils import (
     nearest_pd, shrink_cov_diagonal,
     compute_ewm_cov, ledoitwolf_cov
 )

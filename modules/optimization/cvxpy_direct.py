@@ -4,15 +4,8 @@ import numpy as np
 import cvxpy as cp
 import pandas as pd
 
-# Local utilities for covariance shrinking
-from modules.optimization.utils.cov_shrink import (
-    nearest_pd, shrink_cov_diagonal,
-    compute_ewm_cov, ledoitwolf_cov
-)
-
-# Local utility for mean shrinking
+from modules.optimization.utils.cov_utils import build_covariance_matrix
 from modules.optimization.utils.mean_shrink import shrink_mean_to_grand_mean
-
 
 def direct_max_sharpe_aclass_subtype(
     df_returns: pd.DataFrame,
@@ -23,25 +16,39 @@ def direct_max_sharpe_aclass_subtype(
     subtype_constraints: dict,
     daily_rf: float = 0.0,
     no_short: bool = True,
+
+    # --- Covariance Estimator & Shrinkage ---
+    cov_estimator: str = "sample",        # "sample", "ewma", or "dcc_garch"
+    shrinkage: str = "none",              # "none", "diagonal", "ledoitwolf"
+    ewm_alpha: float = 0.06,
+    diag_shrink_beta: float = 0.2,
     regularize_cov: bool = False,
+    nearest_pd_epsilon: float = 1e-6,
+
+    # DCC-GARCH params (if using "dcc_garch"):
+    garch_p: int = 1,
+    garch_q: int = 1,
+    garch_dist: str = "normal",
+    dcc_alpha: float = 0.05,
+    dcc_beta: float = 0.90,
+
+    # --- Mean Shrink? ---
     shrink_means: bool = False,
-    alpha: float = 0.3,
-    shrink_cov: bool = False,
-    beta: float = 0.2,
-    use_ledoitwolf: bool = False,
-    do_ewm: bool = False,
-    ewm_alpha: float = 0.06
+    alpha_mean_shrink: float = 0.3,
 ):
     """
-    Single-step approach => directly maximize the portfolio's (mean_annual - rf).
-    Ex-post Sharpe is then (ret / vol). If no_short => w >= 0. Class & subtype
-    constraints are enforced.
+    Single-step approach => maximize portfolio's expected return minus rf,
+    i.e. "Maximize (mean_annual @ w - ann_rf)". Then we measure ex-post Sharpe as
+    (ret - rf) / vol.
+
+    We enforce sum(w)=1, optional w >= 0, and also class & subtype constraints.
+    The covariance is built by calling build_covariance_matrix(...), which can handle
+    "sample", "ewma", or "dcc_garch" + shrink.
 
     Returns:
       best_w   : np.array of final weights
-      summary  : dict with {'Annual Return (%)', 'Annual Vol (%)', 'Sharpe Ratio'}
+      summary  : dict with {"Annual Return (%)","Annual Vol (%)","Sharpe Ratio"}
     """
-
     n = len(tickers)
     if df_returns.shape[1] != n:
         raise ValueError("df_returns shape mismatch vs # tickers.")
@@ -50,73 +57,79 @@ def direct_max_sharpe_aclass_subtype(
     if len(security_types) != n:
         raise ValueError("security_types length mismatch.")
 
-    # 1) Clean returns
-    df_ret_clean = df_returns.replace([np.inf, -np.inf], np.nan)
-    df_ret_clean = df_ret_clean.dropna(axis=1, how='all')
-    df_ret_clean = df_ret_clean.dropna(axis=0, how='all').fillna(0.0)
+    # 1) Clean returns => remove Inf/NaN
+    df_ret_clean = df_returns.replace([np.inf, -np.inf], np.nan).dropna(how='all', axis=1)
+    df_ret_clean = df_ret_clean.dropna(how='all', axis=0).fillna(0.0)
     if df_ret_clean.shape[1] < 1 or df_ret_clean.shape[0] < 2:
-        best_w = np.ones(n) / max(n,1)
+        # fallback => eq weights
+        best_w = np.ones(n) / max(n, 1)
         return best_w, {
             "Annual Return (%)": 0.0,
             "Annual Vol (%)": 0.0,
             "Sharpe Ratio": 0.0
         }
 
-    # 2) Covariance
-    if do_ewm:
-        cov_raw = compute_ewm_cov(df_ret_clean, alpha=ewm_alpha)
-    else:
-        if use_ledoitwolf:
-            cov_raw = ledoitwolf_cov(df_ret_clean)
-        else:
-            cov_raw = df_ret_clean.cov().values
-            if regularize_cov:
-                cov_raw = nearest_pd(cov_raw)
-            if shrink_cov and beta > 0:
-                cov_raw = shrink_cov_diagonal(cov_raw, beta)
+    # 2) Build Covariance via unified approach
+    cov_raw = build_covariance_matrix(
+        df_returns=df_ret_clean,
+        estimator=cov_estimator,
+        shrinkage=shrinkage,
+        ewm_alpha=ewm_alpha,
+        diag_shrink_beta=diag_shrink_beta,
+        regularize_cov=regularize_cov,
+        nearest_pd_epsilon=nearest_pd_epsilon,
+        garch_p=garch_p,
+        garch_q=garch_q,
+        garch_dist=garch_dist,
+        dcc_alpha=dcc_alpha,
+        dcc_beta=dcc_beta
+    )
 
-    cov_raw = np.nan_to_num(cov_raw, nan=0.0, posinf=0.0, neginf=0.0)
+    # SHIFT to ensure well-conditioned
     SHIFT_EPS = 1e-8
     cov_fixed = cov_raw + SHIFT_EPS * np.eye(n)
 
     # 3) Means
     mean_daily = df_ret_clean.mean().values
-    if shrink_means and alpha > 0:
-        mean_daily = shrink_mean_to_grand_mean(mean_daily, alpha)
+    if shrink_means and alpha_mean_shrink > 0:
+        mean_daily = shrink_mean_to_grand_mean(mean_daily, alpha_mean_shrink)
     mean_annual = mean_daily * 252
     ann_rf = daily_rf * 252
 
-    # 4) Build CVXPY problem => maximize (mean_annual @ w - ann_rf)
+    # 4) Single-step CVX: maximize (mean_annual@w - rf).
+    # We'll measure ex-post Sharpe = (ret - rf)/vol after the solve.
     w = cp.Variable(n)
+    objective = cp.Maximize(mean_annual @ w - ann_rf)
     cons = [cp.sum(w) == 1]
     if no_short:
         cons.append(w >= 0)
 
     # Class constraints
     unique_cls = set(asset_classes)
-    for cl_ in unique_cls:
-        idxs = [i for i, a_ in enumerate(asset_classes) if a_ == cl_]
-        cdict = class_constraints.get(cl_, {})
-        min_class = cdict.get("min_class_weight", 0.0)
-        max_class = cdict.get("max_class_weight", 1.0)
-        cons.append(cp.sum(w[idxs]) >= min_class)
-        cons.append(cp.sum(w[idxs]) <= max_class)
+    for cls_ in unique_cls:
+        idxs = [i for i, a_ in enumerate(asset_classes) if a_ == cls_]
+        cdict = class_constraints.get(cls_, {})
+        min_cls = cdict.get("min_class_weight", 0.0)
+        max_cls = cdict.get("max_class_weight", 1.0)
+        cons.append(cp.sum(w[idxs]) >= min_cls)
+        cons.append(cp.sum(w[idxs]) <= max_cls)
 
+        # Subtype constraints
         for i_ in idxs:
             stp = security_types[i_]
-            if (cl_, stp) in subtype_constraints:
-                stvals = subtype_constraints[(cl_, stp)]
+            if (cls_, stp) in subtype_constraints:
+                stvals = subtype_constraints[(cls_, stp)]
                 mini = stvals.get("min_instrument", 0.0)
                 maxi = stvals.get("max_instrument", 1.0)
                 cons.append(w[i_] >= mini)
                 cons.append(w[i_] <= maxi)
 
-    obj = cp.Maximize(mean_annual @ w - ann_rf)
-    prob = cp.Problem(obj, cons)
-
+    prob = cp.Problem(objective, cons)
     solved = False
     best_w = np.zeros(n)
-    for solver_ in [cp.ECOS]:
+
+    # 5) Solve
+    for solver_ in [cp.ECOS, cp.OSQP]:
         try:
             prob.solve(solver=solver_, verbose=False)
             if prob.status in ["optimal", "optimal_inaccurate"] and w.value is not None:
@@ -130,6 +143,7 @@ def direct_max_sharpe_aclass_subtype(
         summary = {"Annual Return (%)": 0.0, "Annual Vol (%)": 0.0, "Sharpe Ratio": 0.0}
         return best_w, summary
 
+    # 6) Evaluate ex-post metrics
     w_val = w.value
     ret_ann = float(mean_annual @ w_val)
     var_daily = float(w_val.T @ cov_fixed @ w_val)
