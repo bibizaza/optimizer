@@ -1,12 +1,23 @@
-# modules/optimization/utils/mean_shrink.py
+# File: modules/optimization/utils/mean_shrink.py
 
 import numpy as np
 
-def shrink_mean_to_grand_mean(raw_means: np.ndarray, alpha: float=0.3) -> np.ndarray:
+def shrink_mean_to_grand_mean(mean_vector: np.ndarray, alpha: float) -> np.ndarray:
     """
-    Shrink each asset's mean toward the cross-sectional grand mean.
-    raw_means: shape (N,) - daily mean returns for each asset
-    alpha: fraction in [0,1]. 0 => no shrink, 1 => all means = grand_mean
+    Already existing in your code:
+      mean_vector => shape (N,)
+      alpha => blend fraction
+      final_means = (1 - alpha)*mean_vector + alpha*grand
     """
-    grand_mean = np.mean(raw_means)
-    return (1 - alpha)*raw_means + alpha*grand_mean
+    grand = np.mean(mean_vector)
+    return (1 - alpha)*mean_vector + alpha*grand
+
+def shrink_mean_to_zero(mean_vector: np.ndarray, alpha: float) -> np.ndarray:
+    """
+    NEW function => shrink each asset's mean to 0 by fraction alpha:
+      final = (1 - alpha)*mean_vector + alpha*0
+             = (1 - alpha)*mean_vector
+    """
+    # alpha=0 => no change
+    # alpha=1 => all means => 0
+    return (1.0 - alpha)*mean_vector
