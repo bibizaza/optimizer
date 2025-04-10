@@ -135,27 +135,23 @@ def compute_dcc_garch_cov(
 
 def compute_mcd_cov(df_returns: pd.DataFrame) -> np.ndarray:
     """
-    Computes a robust covariance matrix using Minimum Covariance Determinant (MCD).
-
-    Args:
-      df_returns : DataFrame of shape [T x N], with T time points, N assets.
-
-    Returns:
-      cov_mcd    : NxN robust covariance matrix.
+    Attempt to compute a robust covariance using MCD.
+    If it fails (e.g. too many missing data => not enough rows),
+    fallback to sample covariance and emit a warning/log.
     """
-    # 1) Fit MCD on the raw returns
-    #    The data must be shape [T x N]
-    #    MinCovDet can also estimate a robust mean => mcd.location_
-    mcd_model = MinCovDet().fit(df_returns.values)
-
-    # 2) Extract the robust covariance
-    cov_mcd = mcd_model.covariance_
-
-    # Optional: we might want to check for NaN or Inf
-    cov_mcd = np.nan_to_num(cov_mcd, nan=0.0, posinf=0.0, neginf=0.0)
-
-    return cov_mcd
-
+    try:
+        mcd_model = MinCovDet().fit(df_returns.values)
+        cov_mcd = mcd_model.covariance_
+        cov_mcd = np.nan_to_num(cov_mcd, nan=0.0, posinf=0.0, neginf=0.0)
+        return cov_mcd
+    except ValueError as e:
+        # For example, "kth out of bounds" => not enough rows
+        print(f"[WARNING] MCD failed: {e}. Falling back to sample covariance.")
+        # fallback => sample
+        cov_fallback = df_returns.cov().values
+        cov_fallback = np.nan_to_num(cov_fallback, nan=0.0, posinf=0.0, neginf=0.0)
+        return cov_fallback
+    
 ###############################################################################
 # 5) Master function: build_covariance_matrix
 ###############################################################################

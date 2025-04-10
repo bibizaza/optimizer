@@ -230,8 +230,8 @@ def rolling_bayesian_optimization(
     # Cov estimator => multi
     st.subheader("Cov Estimator (multi)")
     cov_est_choices = st.multiselect(
-        "Pick from sample, ewma, dcc_garch",
-        ["sample","ewma","dcc_garch"],
+        "Pick from sample, ewma, dcc_garch, MCD",
+        ["sample","ewma","dcc_garch","mcd"],
         default=["sample"]
     )
     if not cov_est_choices:

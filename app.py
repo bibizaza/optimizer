@@ -290,7 +290,7 @@ def main():
                     n_points_man = st.number_input("Frontier #points", 5,100,15,5)
 
                 st.write("**Cov Estimator**")
-                cov_estimator = st.selectbox("Cov Est", ["sample","ewma","dcc_garch"], 0)
+                cov_estimator = st.selectbox("Cov Est", ["sample","ewma","dcc_garch","mcd"], 0)
                 ewm_alpha = 0.06
                 garch_p   = 1
                 garch_q   = 1
