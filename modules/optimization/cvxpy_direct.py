@@ -5,7 +5,10 @@ import cvxpy as cp
 import pandas as pd
 
 from modules.optimization.utils.cov_utils import build_covariance_matrix
-from modules.optimization.utils.mean_shrink import shrink_mean_to_grand_mean
+from modules.optimization.utils.mean_shrink import (
+    shrink_mean_to_grand_mean,
+    shrink_mean_to_zero  # <-- newly imported
+)
 
 def direct_max_sharpe_aclass_subtype(
     df_returns: pd.DataFrame,
@@ -25,30 +28,31 @@ def direct_max_sharpe_aclass_subtype(
     regularize_cov: bool = False,
     nearest_pd_epsilon: float = 1e-6,
 
-    # DCC-GARCH params (if using "dcc_garch"):
+    # DCC-GARCH params
     garch_p: int = 1,
     garch_q: int = 1,
     garch_dist: str = "normal",
     dcc_alpha: float = 0.05,
     dcc_beta: float = 0.90,
 
-    # --- Mean Shrink? ---
-    shrink_means: bool = False,
-    alpha_mean_shrink: float = 0.3,
+    # NEW: mean_tech, alpha => replace old "shrink_means" bool
+    mean_tech: str = "none",               # "none", "shrink_to_grand_mean", "shrink_to_zero"
+    alpha_mean_shrink: float = 0.0,
 ):
     """
     Single-step approach => maximize portfolio's expected return minus rf,
-    i.e. "Maximize (mean_annual @ w - ann_rf)". Then we measure ex-post Sharpe as
+    i.e. Maximize(mean_annual@w - ann_rf). We measure ex-post Sharpe as
     (ret - rf) / vol.
-
-    We enforce sum(w)=1, optional w >= 0, and also class & subtype constraints.
-    The covariance is built by calling build_covariance_matrix(...), which can handle
-    "sample", "ewma", or "dcc_garch" + shrink.
+    
+    The covariance is built by calling build_covariance_matrix(...).
+    We currently do NOT integrate that covariance into the objective 
+    (we said we'll do that later). For now, we only do performance screening.
 
     Returns:
       best_w   : np.array of final weights
       summary  : dict with {"Annual Return (%)","Annual Vol (%)","Sharpe Ratio"}
     """
+
     n = len(tickers)
     if df_returns.shape[1] != n:
         raise ValueError("df_returns shape mismatch vs # tickers.")
@@ -69,7 +73,8 @@ def direct_max_sharpe_aclass_subtype(
             "Sharpe Ratio": 0.0
         }
 
-    # 2) Build Covariance via unified approach
+    # 2) Build Covariance (we do not use it in the objective yet, 
+    #    but do it for consistent usage)
     cov_raw = build_covariance_matrix(
         df_returns=df_ret_clean,
         estimator=cov_estimator,
@@ -84,20 +89,20 @@ def direct_max_sharpe_aclass_subtype(
         dcc_alpha=dcc_alpha,
         dcc_beta=dcc_beta
     )
-
-    # SHIFT to ensure well-conditioned
     SHIFT_EPS = 1e-8
     cov_fixed = cov_raw + SHIFT_EPS * np.eye(n)
 
     # 3) Means
     mean_daily = df_ret_clean.mean().values
-    if shrink_means and alpha_mean_shrink > 0:
+    if mean_tech == "shrink_to_grand_mean" and alpha_mean_shrink > 0:
         mean_daily = shrink_mean_to_grand_mean(mean_daily, alpha_mean_shrink)
+    elif mean_tech == "shrink_to_zero" and alpha_mean_shrink > 0:
+        mean_daily = shrink_mean_to_zero(mean_daily, alpha_mean_shrink)
+
     mean_annual = mean_daily * 252
     ann_rf = daily_rf * 252
 
-    # 4) Single-step CVX: maximize (mean_annual@w - rf).
-    # We'll measure ex-post Sharpe = (ret - rf)/vol after the solve.
+    # 4) Single-step CVX: maximize (mean_annual@w - ann_rf)
     w = cp.Variable(n)
     objective = cp.Maximize(mean_annual @ w - ann_rf)
     cons = [cp.sum(w) == 1]
@@ -139,7 +144,7 @@ def direct_max_sharpe_aclass_subtype(
             pass
 
     if not solved or w.value is None:
-        # fallback => zero or eq weight
+        # fallback => zero weights
         summary = {"Annual Return (%)": 0.0, "Annual Vol (%)": 0.0, "Sharpe Ratio": 0.0}
         return best_w, summary
 
