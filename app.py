@@ -314,12 +314,15 @@ def main():
                 regularize_cov= st.checkbox("Regularize Cov?", False)
 
                 st.write("**Mean improvement**")
-                shrink_means = False
+                mean_tech = st.selectbox(
+                    "Mean tech", 
+                    ["none", "shrink_to_grand_mean", "shrink_to_zero"], 
+                    index=0
+                )
                 alpha_mean_shrink = 0.0
-                mean_tech = st.selectbox("Mean tech", ["none","shrink_to_grand_mean"],0)
-                if mean_tech=="shrink_to_grand_mean":
-                    shrink_means      = True
-                    alpha_mean_shrink = st.slider("Alpha mean shrink",0.0,1.0,0.3,0.01)
+                if mean_tech in ("shrink_to_grand_mean", "shrink_to_zero"):
+                    alpha_mean_shrink = st.slider("Alpha mean shrink", 0.0, 1.0, 0.3, 0.01)
+
 
                 # cvar => None
                 cvar_alpha_in  = None
@@ -374,7 +377,7 @@ def main():
                     garch_dist=garch_dist if garch_dist else "normal",
                     dcc_alpha=dcc_alpha if dcc_alpha else 0.05,
                     dcc_beta=dcc_beta if dcc_beta else 0.90,
-                    shrink_means=shrink_means if shrink_means else False,
+                    mean_tech=mean_tech,
                     alpha_mean_shrink=alpha_mean_shrink if alpha_mean_shrink else 0.0
                 )
                 return w_, summ_
@@ -401,7 +404,7 @@ def main():
                     garch_dist=garch_dist if garch_dist else "normal",
                     dcc_alpha=dcc_alpha if dcc_alpha else 0.05,
                     dcc_beta=dcc_beta if dcc_beta else 0.90,
-                    shrink_means=shrink_means if shrink_means else False,
+                    mean_tech=mean_tech,
                     alpha_mean_shrink=alpha_mean_shrink if alpha_mean_shrink else 0.0
                 )
                 return w_, summ_

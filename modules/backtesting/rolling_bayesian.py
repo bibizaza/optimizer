@@ -42,7 +42,8 @@ def run_one_combo(
     shrinkage: str,      # "none","diagonal","ledoitwolf"
     diag_beta: float|None,
 
-    mean_tech: str,      # "none","grand_mean"
+    # NOW includes "shrink_to_zero" as well:
+    mean_tech: str,      # "none","grand_mean","shrink_to_zero"
     mean_alpha: float|None,
 
     rebal_freq: int,
@@ -55,21 +56,27 @@ def run_one_combo(
     """
     1) If param => define param_sharpe_fn => rolling_backtest_monthly_param_sharpe
     2) If direct => define direct_sharpe_fn => rolling_backtest_monthly_direct_sharpe
-    The final ext_metrics from the rolling line approach is used => e.g. {"CAGR","Volatility","Sharpe"}.
-    We'll rename "CAGR" => "Annual Ret", "Volatility" => "Annual Vol", "Sharpe" => "Sharpe Ratio".
+    Then read the final extended metrics => "CAGR","Volatility","Sharpe" => rename them.
     """
 
     col_tickers = df_prices.columns.tolist()
 
-    # Mean shrink logic
-    do_shrink_means  = (mean_tech=="grand_mean")
-    alpha_mean_shr   = mean_alpha if do_shrink_means else 0.0
+    # -----------------------------------------------------------
+    # Mean shrink logic => handle "none", "grand_mean", "shrink_to_zero"
+    # -----------------------------------------------------------
+    if mean_tech == "none":
+        alpha_mean_shr = 0.0
+    else:
+        # either "grand_mean" or "shrink_to_zero" => use mean_alpha if present
+        alpha_mean_shr = mean_alpha if mean_alpha else 0.0
 
     # Diagonal beta if shrinkage="diagonal"
-    diag_shrink_b    = diag_beta if (shrinkage=="diagonal") else 0.0
+    diag_shrink_b = diag_beta if (shrinkage == "diagonal") else 0.0
 
+    # =========================================
+    # ============== PARAMETRIC ==============
+    # =========================================
     if not use_direct_solver:
-        # Param approach
         def param_sharpe_fn(sub_ret: pd.DataFrame):
             w_opt, summary = parametric_max_sharpe_aclass_subtype(
                 df_returns=sub_ret,
@@ -78,72 +85,76 @@ def run_one_combo(
                 security_types=sec_type_list,
                 class_constraints=class_sum_constraints,
                 subtype_constraints=subtype_constraints,
-                daily_rf= daily_rf,
-                no_short= True,
-                n_points= n_points if n_points else 15,
+                daily_rf=daily_rf,
+                no_short=True,
+                n_points=n_points if n_points else 15,
 
                 # Cov + shrink
-                cov_estimator= cov_estimator,
-                ewm_alpha= ewm_alpha if ewm_alpha else 0.06,
-                garch_dist= dcc_dist if dcc_dist else "normal",
-                shrinkage= shrinkage,
-                diag_shrink_beta= diag_shrink_b,
+                cov_estimator=cov_estimator,
+                ewm_alpha=ewm_alpha if ewm_alpha else 0.06,
+                garch_dist=dcc_dist if dcc_dist else "normal",
+                shrinkage=shrinkage,
+                diag_shrink_beta=diag_shrink_b,
 
-                # Mean shrink
-                shrink_means= do_shrink_means,
-                alpha_mean_shrink= alpha_mean_shr
+                # NEW: pass method name & alpha
+                mean_tech=mean_tech,
+                alpha_mean_shrink=alpha_mean_shr,
             )
             return w_opt, summary
 
         sr_line, final_w, _, _, _, ext_metrics = rolling_backtest_monthly_param_sharpe(
-            df_prices= df_prices,
-            df_instruments= df_instruments,
-            param_sharpe_fn= param_sharpe_fn,
-            start_date= df_prices.index[0],
-            end_date= df_prices.index[-1],
-            months_interval= rebal_freq,
-            window_days= lookback_m * 21,
-            transaction_cost_value= transaction_cost_value,
-            transaction_cost_type= transaction_cost_type,
-            trade_buffer_pct= trade_buffer_pct,
-            daily_rf= daily_rf
+            df_prices=df_prices,
+            df_instruments=df_instruments,
+            param_sharpe_fn=param_sharpe_fn,
+            start_date=df_prices.index[0],
+            end_date=df_prices.index[-1],
+            months_interval=rebal_freq,
+            window_days=lookback_m * 21,
+            transaction_cost_value=transaction_cost_value,
+            transaction_cost_type=transaction_cost_type,
+            trade_buffer_pct=trade_buffer_pct,
+            daily_rf=daily_rf
         )
+
+    # ========================================
+    # ================ DIRECT ================
+    # ========================================
     else:
-        # Direct approach
         def direct_sharpe_fn(sub_ret: pd.DataFrame):
             w_opt, summary = direct_max_sharpe_aclass_subtype(
-                df_returns= sub_ret,
-                tickers= col_tickers,
-                asset_classes= asset_cls_list,
-                security_types= sec_type_list,
-                class_constraints= class_sum_constraints,
-                subtype_constraints= subtype_constraints,
-                daily_rf= daily_rf,
-                no_short= True,
+                df_returns=sub_ret,
+                tickers=col_tickers,
+                asset_classes=asset_cls_list,
+                security_types=sec_type_list,
+                class_constraints=class_sum_constraints,
+                subtype_constraints=subtype_constraints,
+                daily_rf=daily_rf,
+                no_short=True,
 
-                cov_estimator= cov_estimator,
-                ewm_alpha= ewm_alpha if ewm_alpha else 0.06,
-                garch_dist= dcc_dist if dcc_dist else "normal",
-                shrinkage= shrinkage,
-                diag_shrink_beta= diag_shrink_b,
+                cov_estimator=cov_estimator,
+                ewm_alpha=ewm_alpha if ewm_alpha else 0.06,
+                garch_dist=dcc_dist if dcc_dist else "normal",
+                shrinkage=shrinkage,
+                diag_shrink_beta=diag_shrink_b,
 
-                shrink_means= do_shrink_means,
-                alpha_mean_shrink= alpha_mean_shr
+                # NEW: pass method name & alpha
+                mean_tech=mean_tech,
+                alpha_mean_shrink=alpha_mean_shr,
             )
             return w_opt, summary
 
         sr_line, final_w, _, _, _, ext_metrics = rolling_backtest_monthly_direct_sharpe(
-            df_prices= df_prices,
-            df_instruments= df_instruments,
-            direct_sharpe_fn= direct_sharpe_fn,
-            start_date= df_prices.index[0],
-            end_date= df_prices.index[-1],
-            months_interval= rebal_freq,
-            window_days= lookback_m * 21,
-            transaction_cost_value= transaction_cost_value,
-            transaction_cost_type= transaction_cost_type,
-            trade_buffer_pct= trade_buffer_pct,
-            daily_rf= daily_rf
+            df_prices=df_prices,
+            df_instruments=df_instruments,
+            direct_sharpe_fn=direct_sharpe_fn,
+            start_date=df_prices.index[0],
+            end_date=df_prices.index[-1],
+            months_interval=rebal_freq,
+            window_days=lookback_m * 21,
+            transaction_cost_value=transaction_cost_value,
+            transaction_cost_type=transaction_cost_type,
+            trade_buffer_pct=trade_buffer_pct,
+            daily_rf=daily_rf
         )
 
     # If no ext_metrics => fallback
@@ -155,8 +166,7 @@ def run_one_combo(
         }
 
     # Now read the keys from compute_extended_metrics(...) 
-    # For example => "Sharpe","CAGR","Volatility"
-    # Adjust if your function uses different names
+    # e.g. "Sharpe","CAGR","Volatility"
     sharpe_val = ext_metrics.get("Sharpe", 0.0)
     ann_ret    = ext_metrics.get("CAGR",   0.0)
     ann_vol    = ext_metrics.get("Volatility", 0.0)
@@ -248,42 +258,46 @@ def rolling_bayesian_optimization(
             dlist=["normal"]
         dcc_dist_dim= Categorical(dlist, name="dcc_dist_")
 
-    # Cov shrink => multi
-    st.subheader("Cov Shrink => multi")
-    shrink_choices= st.multiselect("Pick from none, diagonal, ledoitwolf",
-                                   ["none","diagonal","ledoitwolf"],
-                                   ["none"])
+    # Cov Improvements => multi
+    st.subheader("Cov Improvements")
+    shrink_choices = st.multiselect(
+        "Pick from none, diagonal, ledoitwolf",
+        ["none", "diagonal", "ledoitwolf"],
+        ["none"]
+    )
     if not shrink_choices:
-        shrink_choices=["none"]
-    shrink_dim= Categorical(shrink_choices, name="shrinkage_")
+        shrink_choices = ["none"]
+    shrink_dim = Categorical(shrink_choices, name="shrinkage_")
 
-    diag_dim= None
+    diag_dim = None
     if "diagonal" in shrink_choices:
         st.write("Diagonal shrink beta range")
-        dd1,dd2= st.columns(2)
+        dd1, dd2 = st.columns(2)
         with dd1:
-            diag_min= st.slider("diag beta min",0.0,1.0,0.0,0.05)
+            diag_min = st.slider("diag beta min", 0.0, 1.0, 0.0, 0.05)
         with dd2:
-            diag_max= st.slider("diag beta max",0.0,1.0,0.5,0.05)
-        diag_dim= Real(diag_min, diag_max, name="diag_beta_")
+            diag_max = st.slider("diag beta max", 0.0, 1.0, 0.5, 0.05)
+        diag_dim = Real(diag_min, diag_max, name="diag_beta_")
 
-    # Mean => multi
-    st.subheader("Mean Technique => multi")
-    mean_choices= st.multiselect("Pick from none, grand_mean",
-                                 ["none","grand_mean"], ["none"])
-    if not mean_choices:
-        mean_choices=["none"]
-    mean_dim= Categorical(mean_choices, name="mean_tech_")
+    # Mean Improvements => multi
+    st.subheader("Mean Improvements")
+    mean_choices = st.multiselect(
+        "Pick from none, grand_mean, shrink_to_zero",
+        ["none", "grand_mean", "shrink_to_zero"],
+        ["none"]
+    )
+    mean_dim = Categorical(mean_choices, name="mean_tech_")
 
-    mean_alpha_dim= None
-    if "grand_mean" in mean_choices:
+    mean_alpha_dim = None
+    # We show alpha slider if user picks "grand_mean" OR "shrink_to_zero":
+    if "grand_mean" in mean_choices or "shrink_to_zero" in mean_choices:
         st.write("Mean alpha range")
-        mm1, mm2= st.columns(2)
+        mm1, mm2 = st.columns(2)
         with mm1:
-            alpha_min= st.slider("mean alpha min",0.0,1.0,0.0,0.05)
+            alpha_min = st.slider("mean alpha min", 0.0, 1.0, 0.0, 0.05)
         with mm2:
-            alpha_max= st.slider("mean alpha max",0.0,1.0,0.3,0.05)
-        mean_alpha_dim= Real(alpha_min, alpha_max, name="mean_alpha_")
+            alpha_max = st.slider("mean alpha max", 0.0, 1.0, 0.3, 0.05)
+        mean_alpha_dim = Real(alpha_min, alpha_max, name="mean_alpha_")
 
     # Rebalance freq
     st.subheader("Rebalance freq (months)")

@@ -7,8 +7,10 @@ from modules.optimization.utils.cov_utils import (
     build_covariance_matrix,
 )
 
-# If you still have a mean shrink function:
-from modules.optimization.utils.mean_shrink import shrink_mean_to_grand_mean
+from modules.optimization.utils.mean_shrink import (
+    shrink_mean_to_grand_mean,
+    shrink_mean_to_zero,
+)
 
 def parametric_max_sharpe_aclass_subtype(
     df_returns: pd.DataFrame,
@@ -37,8 +39,8 @@ def parametric_max_sharpe_aclass_subtype(
     dcc_beta: float = 0.90,
 
     # === Mean shrink?
-    shrink_means: bool = False,
-    alpha_mean_shrink: float = 0.3,
+    mean_tech: str = "none", 
+    alpha_mean_shrink: float = 0.0,
 ):
     """
     Parametric approach for Maximum Sharpe:
@@ -118,10 +120,13 @@ def parametric_max_sharpe_aclass_subtype(
 
     # 3) Means
     mean_ret = df_ret_clean.mean().values
-    if shrink_means and alpha_mean_shrink > 0:
+    if mean_tech == "shrink_to_grand_mean" and alpha_mean_shrink > 0:
         mean_ret = shrink_mean_to_grand_mean(mean_ret, alpha_mean_shrink)
-    ann_rf = daily_rf * 252
+    elif mean_tech == "shrink_to_zero" and alpha_mean_shrink > 0:
+        mean_ret = shrink_mean_to_zero(mean_ret, alpha_mean_shrink)
 
+    ann_rf = daily_rf * 252
+    
     # We'll do a grid of target returns => [targ_min, targ_max]
     best_sharpe = -np.inf
     best_w = np.ones(n) / max(n, 1)
