@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.covariance import LedoitWolf
+from sklearn.covariance import MinCovDet
 
 ###############################################################################
 # 1) Basic PSD & Shrink Helpers
@@ -129,12 +130,39 @@ def compute_dcc_garch_cov(
     return cov_final
 
 ###############################################################################
-# 4) Master function: build_covariance_matrix
+# 4) Manual DCC-GARCH (arch≥7 compatible)
+###############################################################################
+
+def compute_mcd_cov(df_returns: pd.DataFrame) -> np.ndarray:
+    """
+    Computes a robust covariance matrix using Minimum Covariance Determinant (MCD).
+
+    Args:
+      df_returns : DataFrame of shape [T x N], with T time points, N assets.
+
+    Returns:
+      cov_mcd    : NxN robust covariance matrix.
+    """
+    # 1) Fit MCD on the raw returns
+    #    The data must be shape [T x N]
+    #    MinCovDet can also estimate a robust mean => mcd.location_
+    mcd_model = MinCovDet().fit(df_returns.values)
+
+    # 2) Extract the robust covariance
+    cov_mcd = mcd_model.covariance_
+
+    # Optional: we might want to check for NaN or Inf
+    cov_mcd = np.nan_to_num(cov_mcd, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return cov_mcd
+
+###############################################################################
+# 5) Master function: build_covariance_matrix
 ###############################################################################
 def build_covariance_matrix(
     df_returns: pd.DataFrame,
-    estimator: str = "sample",  # "sample", "ewma", or "dcc_garch"
-    shrinkage: str = "none",    # "none", "diagonal", "ledoitwolf"
+    estimator: str = "sample",   # "sample", "ewma", "dcc_garch", "mcd"
+    shrinkage: str = "none",     # "none", "diagonal", "ledoitwolf"
     ewm_alpha: float = 0.06,
     diag_shrink_beta: float = 0.2,
     regularize_cov: bool = False,
@@ -151,9 +179,11 @@ def build_covariance_matrix(
     Main entry point for building a covariance matrix given a df_returns DataFrame
     and user-chosen parameters.
 
-    - "sample": plain sample covariance
-    - "ewma":   exponential weighted moving covariance
-    - "dcc_garch": a manual DCC(1,1) recursion => final NxN covariance
+    Possible estimator values:
+      - "sample"
+      - "ewma"
+      - "dcc_garch"
+      - "mcd"  (NEW: Minimum Covariance Determinant, robust to outliers)
     """
     if df_returns.shape[0] < 2:
         return np.eye(df_returns.shape[1])
@@ -174,6 +204,11 @@ def build_covariance_matrix(
             dcc_alpha=dcc_alpha,
             dcc_beta=dcc_beta
         )
+
+    elif estimator == "mcd":
+        # NEW: robust MCD approach
+        cov_raw = compute_mcd_cov(df_returns)
+
     else:
         raise ValueError(f"Unknown estimator: {estimator}")
 
@@ -188,7 +223,7 @@ def build_covariance_matrix(
     else:
         raise ValueError(f"Unknown shrinkage: {shrinkage}")
 
-    # 3) (Optional) nearest_pd
+    # 3) (Optional) nearest_pd for regularization
     if regularize_cov:
         cov_final = nearest_pd(cov_shrunk, epsilon=nearest_pd_epsilon)
     else:
