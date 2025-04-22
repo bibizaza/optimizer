@@ -82,14 +82,58 @@ def sidebar_data_and_constraints():
     coverage = 0.8
     main_constr = {}
 
+    # helper: ask once, after df_prices is loaded
+    def _convert_if_needed(df_prices_in: pd.DataFrame) -> pd.DataFrame:
+        """
+        Interpret the uploaded numeric columns according to user choice:
+        • Level / Price (already total‑return)
+        • Cumulative TR   (starts at 0)
+        • 1‑day TR (%)    (0.30  means 0.30%, i.e. 0.003)
+        Output is always a “price‑like” level series beginning at 1.
+        """
+        if df_prices_in.empty:
+            return df_prices_in
+
+        choice = st.sidebar.selectbox(
+            "Interpret numeric columns as …",
+            [
+                "Level / Price (already total‑return)",
+                "Cumulative TR (starts at 0)",
+                "1‑day TR (%) values"
+            ],
+            index=0
+        )
+
+        if choice.startswith("Cumulative"):
+            # 0, 0.05, 0.10 …  →  1.00, 1.05, 1.10 …
+            df_out = 1.0 + df_prices_in
+
+        elif choice.startswith("1‑day"):
+            # convert 0.30 (=0.30%) to decimal, then build price index
+            df_ret_dec = df_prices_in * 0.01          # 0.30 → 0.003
+            df_out = (1.0 + df_ret_dec).cumprod()
+            df_out.iloc[0, :] = 1.0                   # force first row = 1
+
+        else:  # already level
+            df_out = df_prices_in.copy()
+
+        # safety: forward/back fill any remaining NAs
+        df_out = df_out.sort_index().ffill().bfill()
+        return df_out
+
+
+    # ---------------------------------------------------------------- 1) Converter
     if approach_data == "One-time Convert Excel->Parquet":
-        st.sidebar.info("Excel->Parquet converter not shown here.")
+        st.sidebar.info("Excel→Parquet converter not shown here.")
         return df_instruments, df_prices, coverage, main_constr
 
+    # ---------------------------------------------------------------- 2) Excel
     elif approach_data == "Use Excel for Analysis":
-        excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx or .xlsm)", type=["xlsx","xlsm"])
+        excel_file = st.sidebar.file_uploader("Upload Excel (.xlsx / .xlsm)", type=["xlsx", "xlsm"])
         if excel_file:
-            df_instruments, df_prices = parse_excel(excel_file)
+            df_instruments, df_prices_raw = parse_excel(excel_file)
+            df_prices = _convert_if_needed(df_prices_raw)
+
             if not df_prices.empty:
                 coverage = st.sidebar.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
                 st.sidebar.markdown("---")
@@ -97,13 +141,17 @@ def sidebar_data_and_constraints():
                 main_constr = get_main_constraints(df_instruments, df_prices)
             else:
                 st.sidebar.warning("No valid data in Excel.")
+
+    # ---------------------------------------------------------------- 3) Parquet
     else:
         st.sidebar.info("Upload instruments.parquet & prices.parquet")
         fi = st.sidebar.file_uploader("Upload instruments.parquet", type=["parquet"])
-        fp = st.sidebar.file_uploader("Upload prices.parquet", type=["parquet"])
+        fp = st.sidebar.file_uploader("Upload prices.parquet",     type=["parquet"])
         if fi and fp:
             df_instruments = pd.read_parquet(fi)
-            df_prices = pd.read_parquet(fp)
+            df_prices_raw  = pd.read_parquet(fp)
+            df_prices = _convert_if_needed(df_prices_raw)
+
             if not df_prices.empty:
                 coverage = st.sidebar.slider("Min coverage fraction", 0.0, 1.0, 0.8, 0.05)
                 st.sidebar.markdown("---")
@@ -113,6 +161,7 @@ def sidebar_data_and_constraints():
                 st.sidebar.warning("No valid data in Parquet files.")
 
     return df_instruments, df_prices, coverage, main_constr
+
 
 
 ###############################################################################
@@ -130,37 +179,55 @@ def clean_df_prices(df_prices: pd.DataFrame, min_coverage=0.8) -> pd.DataFrame:
     df_prices.fillna(method="bfill", inplace=True)
     return df_prices
 
-def build_df_drift_weights(df_instruments: pd.DataFrame, df_sub: pd.DataFrame) -> np.ndarray:
+def build_df_drift_weights(df_instruments: pd.DataFrame,
+                           df_tr: pd.DataFrame) -> np.ndarray:
     """
-    Compute final drift weights (buy & hold) from #Quantity * last_price.
-    """
-    qties = df_instruments["#Quantity"].fillna(0.0).values
-    last_prices = df_sub.iloc[-1].fillna(0.0).values
-    val = qties * last_prices
-    total_val = val.sum()
-    if total_val <= 0:
-        total_val = 1.0
-    return val / total_val
+    Compute final weights of the original buy‑&‑hold portfolio.
 
-def build_old_portfolio_line(df_instruments: pd.DataFrame, df_prices: pd.DataFrame) -> pd.Series:
+    Works when you have both:
+      – #Quantity per instrument
+      – #Last_Price (market price on reference date, typically last row of df_tr)
     """
-    If #Quantity present => build old drift line => no rebal.
+    if "#Quantity" not in df_instruments.columns or "#Last_Price" not in df_instruments.columns:
+        return np.zeros(df_tr.shape[1])
+
+    qty   = df_instruments["#Quantity"].fillna(0.0).values      # (N,)
+    p_ref = df_instruments["#Last_Price"].fillna(0.0).values    # (N,)
+
+    # value on reference date
+    val_ref = qty * p_ref
+    tot_val = val_ref.sum()
+    return val_ref / tot_val if tot_val > 0 else np.zeros_like(val_ref)
+
+def build_old_portfolio_line(df_instruments: pd.DataFrame,
+                             df_tr: pd.DataFrame) -> pd.Series:
     """
-    df_prices = df_prices.sort_index()
-    ticker_qty = {}
-    for _, row in df_instruments.iterrows():
-        tkr = row["#ID"]
-        qty = row["#Quantity"]
-        ticker_qty[tkr] = qty
-    col_list = df_prices.columns
-    old_shares = np.array([ticker_qty.get(c, 0.0) for c in col_list])
-    vals = [np.sum(old_shares * row.values) for _, row in df_prices.iterrows()]
-    sr = pd.Series(vals, index=df_prices.index)
-    if len(sr) > 0 and sr.iloc[0] <= 0:
-        sr.iloc[0] = 1.0
-    if len(sr) > 0:
-        sr = sr / sr.iloc[0]
-    sr.name = "Old_Drift"
+    Recreate the drifted value of the original portfolio **using total‑return levels**.
+
+    price_t = Last_Price * ( TR_t / TR_ref )
+    where TR_ref = last row of df_tr (same date as Last_Price snapshot).
+    """
+    if ("#Quantity" not in df_instruments.columns or
+        "#Last_Price" not in df_instruments.columns):
+        return pd.Series(dtype=float)
+
+    qty   = df_instruments.set_index("#ID")["#Quantity"].fillna(0.0)
+    p_ref = df_instruments.set_index("#ID")["#Last_Price"].fillna(0.0)
+
+    # align to df_tr columns
+    qty   = qty.reindex(df_tr.columns).fillna(0.0).values       # (N,)
+    p_ref = p_ref.reindex(df_tr.columns).fillna(0.0).values     # (N,)
+
+    tr_ref = df_tr.iloc[-1].replace(0.0, np.nan).values         # (N,)
+    tr_ref = np.where(np.isnan(tr_ref), 1.0, tr_ref)            # avoid /0
+
+    # price path for each asset
+    price_mat = p_ref * (df_tr.values / tr_ref)                 # (T×N)
+
+    # portfolio value across time
+    port_val = (price_mat * qty).sum(axis=1)                    # (T,)
+    port_val[0] = max(port_val[0], 1.0)                         # avoid 0
+    sr = pd.Series(port_val / port_val[0], index=df_tr.index, name="Old_Drift")
     return sr
 
 
