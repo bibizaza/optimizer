@@ -307,7 +307,7 @@ def main():
                     dcc_beta  = st.slider("DCC beta", 0.0,1.0,0.90,0.01)
 
                 st.write("**Cov Shrink**")
-                shrinkage = st.selectbox("Shrink method", ["none","ledoitwolf","diagonal"], 0)
+                shrinkage = st.selectbox("Shrink method", ["none","ledoitwolf","diagonal","oas"], 0)
                 diag_shrink_beta= 0.2
                 if shrinkage=="diagonal":
                     diag_shrink_beta= st.slider("Diag Beta",0.0,1.0,0.2,0.01)

@@ -2,8 +2,7 @@
 
 import numpy as np
 import pandas as pd
-from sklearn.covariance import LedoitWolf
-from sklearn.covariance import MinCovDet
+from sklearn.covariance import LedoitWolf, OAS, MinCovDet
 
 ###############################################################################
 # 1) Basic PSD & Shrink Helpers
@@ -35,6 +34,13 @@ def ledoitwolf_cov(df_returns: pd.DataFrame) -> np.ndarray:
     """
     lw_model = LedoitWolf().fit(df_returns.values)
     return lw_model.covariance_
+
+def oas_cov(df_returns: pd.DataFrame) -> np.ndarray:
+    """
+    Fit an OAS model to df_returns and return the shrunk covariance.
+    """
+    oas_model = OAS().fit(df_returns.values)
+    return oas_model.covariance_
 
 ###############################################################################
 # 2) EWMA Covariance
@@ -214,6 +220,9 @@ def build_covariance_matrix(
         cov_shrunk = lw_model.covariance_
     elif shrinkage == "diagonal":
         cov_shrunk = shrink_cov_diagonal(cov_raw, beta=diag_shrink_beta)
+    elif shrinkage == "oas":
+        oas_model = OAS().fit(df_returns.values)
+        cov_shrunk = oas_model.covariance_
     elif shrinkage == "none":
         cov_shrunk = cov_raw
     else:

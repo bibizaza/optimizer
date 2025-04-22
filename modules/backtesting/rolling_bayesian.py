@@ -261,8 +261,8 @@ def rolling_bayesian_optimization(
     # Cov Improvements => multi
     st.subheader("Cov Improvements")
     shrink_choices = st.multiselect(
-        "Pick from none, diagonal, ledoitwolf",
-        ["none", "diagonal", "ledoitwolf"],
+        "Pick from none, diagonal, ledoitwolf, oas",
+        ["none", "diagonal", "ledoitwolf","oas"],
         ["none"]
     )
     if not shrink_choices:
