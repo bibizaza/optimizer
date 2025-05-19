@@ -805,5 +805,33 @@ def main():
             show_cvar=True
         )
 
+
+        with st.expander("Export to Excel", expanded=False):
+            extm_new   = r_["extm_new"]
+            extm_strat = r_["extm_strat"]
+            extm_drift = r_["extm_drift"]   # already in session_state
+
+            excel_bytes = export_backtest_results_to_excel(
+                sr_line_new       = sr_new,
+                df_rebal          = df_rebal,
+                ext_metrics_new   = extm_new,
+                ext_metrics_old   = extm_strat,
+                sr_line_strategic = sr_strat,
+                sr_line_drift     = sr_drift,
+                final_w_array     = w_new,
+                old_w_array       = w_strat,
+                tickers           = col_tickers
+            )
+
+            st.download_button(
+                "Download backtest_results.xlsx",
+                data      = excel_bytes,
+                file_name = "backtest_results.xlsx",
+                mime      = (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                )
+            )
+
 if __name__=="__main__":
     main()

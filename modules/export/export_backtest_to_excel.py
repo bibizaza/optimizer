@@ -5,10 +5,11 @@ import pandas as pd
 
 def export_backtest_results_to_excel(
     sr_line_new: pd.Series,
-    sr_line_old: pd.Series,
     df_rebal: pd.DataFrame,
     ext_metrics_new: dict,
     ext_metrics_old: dict,
+    sr_line_strategic: pd.Series | None = None,
+    sr_line_drift: pd.Series | None = None,
     final_w_array=None,
     old_w_array=None,
     tickers=None
@@ -30,10 +31,16 @@ def export_backtest_results_to_excel(
             df_new = sr_line_new.to_frame("New_Ptf_Value")
             df_new.to_excel(writer, sheet_name="NewPortfolio", index=True)
 
-        # 2) Old portfolio line
-        if sr_line_old is not None:
-            df_old = sr_line_old.to_frame("Old_Ptf_Value")
-            df_old.to_excel(writer, sheet_name="OldPortfolio", index=True)
+        # 2) Old Strategic line
+        if sr_line_strategic is not None:
+            df_strat = sr_line_strategic.to_frame("Old_Strategic_Value")
+            df_strat.to_excel(writer, sheet_name="OldStrategic", index=True)
+
+        # 3) Old Drift line (optional)
+        if sr_line_drift is not None:
+            df_drift = sr_line_drift.to_frame("Old_Drift_Value")
+            df_drift.to_excel(writer, sheet_name="OldDrift", index=True)
+
 
         # 3) Rebalancing details
         if df_rebal is not None and not df_rebal.empty:
