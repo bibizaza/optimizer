@@ -28,9 +28,9 @@ def plot_drawdown_series(df_abs: pd.DataFrame, custom_title: str = "Drawdown Ove
 
     # 2) Assign colors matching your app’s color scheme
     color_map = {
-        "New Optimized": "#1f77b4",
+        "New Optimized": "#D6B77D",
         "Old Drift": "grey",
-        "Old Strategic": "lightblue",
+        "Old Strategic": "#00B0F0",
     }
     color_sequence = [color_map.get(col, "#666666") for col in df_dd.columns]
 
