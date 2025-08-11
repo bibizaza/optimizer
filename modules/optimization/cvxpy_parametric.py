@@ -2,7 +2,13 @@ import numpy as np
 import pandas as pd
 import cvxpy as cp
 
-# Import our new build_covariance_matrix from cov_utils
+# Import our dynamic backend. ``xp`` is either CuPy or NumPy and
+# ``pd_xp`` is either cuDF or Pandas. ``GPU_AVAILABLE`` indicates
+# whether the GPU path is active.
+from modules.optimization.utils.backend import xp, pd_xp, GPU_AVAILABLE  # noqa: F401
+
+# Import our covariance builder and mean shrinkage functions. These are
+# implemented to operate on the selected backend transparently.
 from modules.optimization.utils.cov_utils import (
     build_covariance_matrix,
 )
@@ -87,10 +93,12 @@ def parametric_max_sharpe_aclass_subtype(
         raise ValueError("security_types length mismatch.")
 
     # 1) Clean returns => remove inf/NaN
+    # We perform data cleaning on the CPU using pandas to ensure
+    # compatibility with cuDF, then transfer to the GPU if available.
     df_ret_clean = df_returns.replace([np.inf, -np.inf], np.nan).dropna(how='all', axis=1)
     df_ret_clean = df_ret_clean.dropna(how='all', axis=0).fillna(0.0)
     if df_ret_clean.shape[1] < 1 or df_ret_clean.shape[0] < 2:
-        # fallback => eq weights
+        # fallback => equal weights if not enough data
         best_w = np.ones(n) / max(n, 1)
         return best_w, {
             "Annual Return (%)": 0.0,
@@ -98,9 +106,20 @@ def parametric_max_sharpe_aclass_subtype(
             "Sharpe Ratio": 0.0
         }
 
-    # 2) Build Covariance via new build_covariance_matrix
+    # 2) Convert cleaned returns to the appropriate backend. When
+    # running on the GPU, we convert the pandas DataFrame to cuDF;
+    # otherwise we keep the pandas DataFrame. ``pd_xp.from_pandas``
+    # handles the conversion internally.
+    if GPU_AVAILABLE:
+        df_ret_dev = pd_xp.from_pandas(df_ret_clean)
+    else:
+        df_ret_dev = df_ret_clean
+
+    # 3) Build the covariance matrix on the selected backend. The
+    # resulting matrix is an xp.ndarray (CuPy or NumPy) depending
+    # on ``GPU_AVAILABLE``.
     cov_raw = build_covariance_matrix(
-        df_returns=df_ret_clean,
+        df_returns=df_ret_dev,
         estimator=cov_estimator,
         shrinkage=shrinkage,
         ewm_alpha=ewm_alpha,
@@ -111,34 +130,48 @@ def parametric_max_sharpe_aclass_subtype(
         garch_q=garch_q,
         garch_dist=garch_dist,
         dcc_alpha=dcc_alpha,
-        dcc_beta=dcc_beta
+        dcc_beta=dcc_beta,
     )
 
-    # SHIFT to ensure well-conditioned in the solver
+    # SHIFT to ensure well‑conditioned matrices. Use ``xp.eye`` so that
+    # the shift happens on the appropriate device.
     SHIFT_EPS = 1e-8
-    cov_shifted = cov_raw + SHIFT_EPS * np.eye(n)
+    cov_shifted = cov_raw + SHIFT_EPS * xp.eye(n)
 
-    # 3) Means
-    mean_ret = df_ret_clean.mean().values
+    # 4) Compute expected returns on the device
+    mean_ret_dev = df_ret_dev.mean().values
+    # Apply mean shrinkage if requested. The shrinkage functions
+    # operate on either CuPy or NumPy arrays transparently.
     if mean_tech == "shrink_to_grand_mean" and alpha_mean_shrink > 0:
-        mean_ret = shrink_mean_to_grand_mean(mean_ret, alpha_mean_shrink)
+        mean_ret_dev = shrink_mean_to_grand_mean(mean_ret_dev, alpha_mean_shrink)
     elif mean_tech == "shrink_to_zero" and alpha_mean_shrink > 0:
-        mean_ret = shrink_mean_to_zero(mean_ret, alpha_mean_shrink)
+        mean_ret_dev = shrink_mean_to_zero(mean_ret_dev, alpha_mean_shrink)
 
+    # Compute annualised risk‑free rate
     ann_rf = daily_rf * 252
-    
-    # We'll do a grid of target returns => [targ_min, targ_max]
-    best_sharpe = -np.inf
-    best_w = np.ones(n) / max(n, 1)
 
-    asset_ann_ret = mean_ret * 252
+    # Prepare to search over target returns. Convert device arrays
+    # back to CPU for operations that must run on the CPU (linspace).
+    # xp.asnumpy returns a NumPy array when on the GPU; on the CPU it
+    # simply returns the original array.
+    mean_ret_cpu = xp.asnumpy(mean_ret_dev) if GPU_AVAILABLE else mean_ret_dev
+    asset_ann_ret = mean_ret_cpu * 252
     targ_min = max(0.0, asset_ann_ret.min())
     targ_max = asset_ann_ret.max()
     candidate_targets = np.linspace(targ_min, targ_max, n_points)
 
-    # 4) Solve min-var for each target => pick best ex-post Sharpe
-    # We create a PSD-wrapped version of cov_shifted for cvxpy
-    P = cp.psd_wrap(cov_shifted)  # or you can do cp.quad_form(...) with P directly
+    # Transfer covariance matrix to the CPU for CVXPY. cvxpy does not
+    # support CuPy arrays; therefore we convert here. ``cov_cpu`` is
+    # always a NumPy array at this point.
+    cov_cpu = xp.asnumpy(cov_shifted) if GPU_AVAILABLE else cov_shifted
+
+    best_sharpe = -np.inf
+    # Placeholder for the best weights on the CPU
+    best_w_cpu = np.ones(n) / max(n, 1)
+
+    # Wrap covariance matrix for cvxpy; this remains constant across
+    # the loop. ``cp.psd_wrap`` ensures numerical stability.
+    P = cp.psd_wrap(cov_cpu)
 
     for targ in candidate_targets:
         w = cp.Variable(n)
@@ -146,8 +179,9 @@ def parametric_max_sharpe_aclass_subtype(
         cons = [cp.sum(w) == 1]
         if no_short:
             cons.append(w >= 0)
-        # portfolio return >= targ
-        cons.append((mean_ret @ w) * 252 >= targ)
+        # Portfolio return constraint. ``mean_ret_cpu`` is a 1‑D
+        # NumPy array at this point.
+        cons.append((mean_ret_cpu @ w) * 252 >= targ)
 
         # Class constraints
         unique_cls = set(asset_classes)
@@ -183,9 +217,11 @@ def parametric_max_sharpe_aclass_subtype(
         if not solved or w.value is None:
             continue
 
-        w_val = w.value
-        vol_ann = float(np.sqrt(w_val.T @ cov_shifted @ w_val) * np.sqrt(252))
-        ret_ann = float(mean_ret @ w_val * 252)
+        # Extract weights on the CPU
+        w_val_cpu = w.value
+        # Compute annualised volatility and return on the CPU
+        vol_ann = float(np.sqrt(w_val_cpu.T @ cov_cpu @ w_val_cpu) * np.sqrt(252))
+        ret_ann = float(mean_ret_cpu @ w_val_cpu * 252)
         if vol_ann < 1e-12:
             sr_ = -np.inf
         else:
@@ -193,14 +229,14 @@ def parametric_max_sharpe_aclass_subtype(
 
         if sr_ > best_sharpe:
             best_sharpe = sr_
-            best_w = w_val.copy()
+            best_w_cpu = w_val_cpu.copy()
 
-    final_ret = float(mean_ret @ best_w * 252)
-    final_vol = float(np.sqrt(best_w.T @ cov_shifted @ best_w) * np.sqrt(252))
+    final_ret = float(mean_ret_cpu @ best_w_cpu * 252)
+    final_vol = float(np.sqrt(best_w_cpu.T @ cov_cpu @ best_w_cpu) * np.sqrt(252))
     summary = {
         "Annual Return (%)": round(final_ret, 2),
         "Annual Vol (%)": round(final_vol, 2),
-        "Sharpe Ratio": round(best_sharpe, 4)
+        "Sharpe Ratio": round(best_sharpe, 4),
     }
 
-    return best_w, summary
+    return best_w_cpu, summary
